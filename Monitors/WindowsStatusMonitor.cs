@@ -170,12 +170,23 @@ public static class WindowsStatusMonitor
 
     // ¿El proceso corre con permisos de Administrador? Sin ellos el driver de
     // bajo nivel no se puede usar y la temperatura del CPU no se lee.
+    // Sirve tanto para un usuario elevado a Administrador como para la
+    // cuenta SYSTEM (la que usa, por ejemplo, una tarea programada con
+    // /RU SYSTEM). SYSTEM tiene privilegios equivalentes o superiores a
+    // Administrador en la práctica, pero WindowsIdentity no siempre la
+    // reporta como miembro del grupo "Administradores" — por eso se
+    // comprueba también el SID bien conocido de SYSTEM directamente.
     public static bool EsAdministrador()
     {
         if (!OperatingSystem.IsWindows()) return false;
 
         using WindowsIdentity identidad = WindowsIdentity.GetCurrent();
-        return new WindowsPrincipal(identidad).IsInRole(WindowsBuiltInRole.Administrator);
+        var principal = new WindowsPrincipal(identidad);
+
+        if (principal.IsInRole(WindowsBuiltInRole.Administrator)) return true;
+
+        var sidSystem = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        return identidad.User?.Equals(sidSystem) == true;
     }
 
     // Modo diagnóstico (dotnet run -- --sensores): lista el hardware detectado

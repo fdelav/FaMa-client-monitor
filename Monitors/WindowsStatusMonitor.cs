@@ -1,3 +1,4 @@
+using System.Security.Principal;
 using LibreHardwareMonitor.Hardware;
 
 namespace FaMaClientMonitor.Monitors;
@@ -108,8 +109,36 @@ public static class WindowsStatusMonitor
         return 0f;
     }
 
-    // Retorna la temperatura del "paquete" de CPU en grados Celsius.
-    // Requiere permisos de Administrador en la mayoría de los equipos.
+    // Rango en el que una temperatura de CPU se considera una lectura real.
+    // Un sensor sin dato (o sin driver/permisos) suele devolver 0 o un valor
+    // absurdo; eso NO se debe reportar como "el CPU está a 0 °C".
+    private const float TempMinValida = 1f;
+    private const float TempMaxValida = 125f;
+
+    // Nombres de sensor, de más a menos representativos de la temperatura
+    // general del CPU. Intel expone "CPU Package"; AMD Ryzen expone
+    // "Core (Tctl/Tdie)". Se compara sin distinguir mayúsculas.
+    private static readonly string[] _sensoresTempPreferidos =
+    [
+        "CPU Package",
+        "Core (Tctl/Tdie)",
+        "Tctl",
+        "Tdie",
+        "Package",
+        "Core Average",
+        "Core Max",
+    ];
+
+    private static bool TieneLecturaValida(ISensor sensor)
+        => sensor.Value is float valor && valor >= TempMinValida && valor <= TempMaxValida;
+
+    // Retorna la temperatura general del CPU en grados Celsius, o 0 si no hay
+    // ninguna lectura válida (ver ImprimirDiagnostico para saber por qué).
+    //
+    // Para leer la temperatura del CPU hacen falta DOS cosas:
+    //   1. Ejecutar como Administrador.
+    //   2. Tener instalado el driver PawnIO (LibreHardwareMonitorLib 0.9.5+
+    //      lo usa en lugar de WinRing0): winget install PawnIO.PawnIO
     public static float GetCpuTemperature()
     {
         ActualizarLecturas();
@@ -118,22 +147,65 @@ public static class WindowsStatusMonitor
         {
             if (hardware.HardwareType != HardwareType.Cpu) continue;
 
-            var sensoresTemp = hardware.Sensors
-                .Where(s => s.SensorType == SensorType.Temperature)
+            var validos = hardware.Sensors
+                .Where(s => s.SensorType == SensorType.Temperature && TieneLecturaValida(s))
                 .ToList();
 
-            // Preferimos el sensor "Package"/"Tctl" (temperatura general del
-            // CPU); si no existe, tomamos el primer sensor de temperatura
-            // disponible como respaldo.
-            ISensor? paquete = sensoresTemp.FirstOrDefault(
-                s => s.Name.Contains("Package") || s.Name.Contains("Tctl") || s.Name.Contains("Average"));
+            if (validos.Count == 0) continue;
 
-            paquete ??= sensoresTemp.FirstOrDefault();
+            foreach (string nombre in _sensoresTempPreferidos)
+            {
+                ISensor? preferido = validos.FirstOrDefault(
+                    s => s.Name.Contains(nombre, StringComparison.OrdinalIgnoreCase));
 
-            if (paquete?.Value is float valor) return valor;
+                if (preferido is not null) return preferido.Value.GetValueOrDefault();
+            }
+
+            // No hay un sensor "general": se toma el núcleo más caliente.
+            return validos.Max(s => s.Value.GetValueOrDefault());
         }
 
         return 0f;
+    }
+
+    // ¿El proceso corre con permisos de Administrador? Sin ellos el driver de
+    // bajo nivel no se puede usar y la temperatura del CPU no se lee.
+    public static bool EsAdministrador()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+
+        using WindowsIdentity identidad = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identidad).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    // Modo diagnóstico (dotnet run -- --sensores): lista el hardware detectado
+    // y todos sus sensores de temperatura, para ver qué está viendo realmente
+    // la librería y por qué la temperatura del CPU sale (o no) bien.
+    public static void ImprimirDiagnostico()
+    {
+        ActualizarLecturas();
+
+        Console.WriteLine($"Ejecutando como Administrador: {(EsAdministrador() ? "SÍ" : "NO")}");
+        Console.WriteLine();
+
+        foreach (IHardware hardware in _computer.Hardware)
+        {
+            var sensores = hardware.Sensors.ToList();
+            Console.WriteLine($"[{hardware.HardwareType}] {hardware.Name} — {sensores.Count} sensor(es) en total");
+
+            foreach (ISensor sensor in sensores.Where(s => s.SensorType == SensorType.Temperature))
+            {
+                string lectura = sensor.Value is float valor ? $"{valor:F1} °C" : "sin valor";
+                string estado = TieneLecturaValida(sensor) ? "" : "   <-- lectura no válida";
+                Console.WriteLine($"    Temperatura · {sensor.Name}: {lectura}{estado}");
+            }
+        }
+
+        Console.WriteLine();
+        float temperatura = GetCpuTemperature();
+        Console.WriteLine(temperatura > 0f
+            ? $"Temperatura de CPU que se enviaría a la API: {temperatura:F1} °C"
+            : "Temperatura de CPU que se enviaría a la API: 0 (no hay ninguna lectura válida)");
     }
 
     // Libera los recursos de LibreHardwareMonitorLib. Llamar al cerrar la app.

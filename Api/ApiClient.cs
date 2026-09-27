@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 
 namespace FaMaClientMonitor.Api;
 
@@ -9,6 +10,10 @@ public static class ApiClient
     {
         Timeout = TimeSpan.FromSeconds(10),
     };
+
+    // La API serializa con camelCase (ej. "usageCode", "apiKey") y acepta el
+    // nombre de propiedad sin distinguir mayúsculas al recibir JSON.
+    private static readonly JsonSerializerOptions _jsonWeb = new(JsonSerializerDefaults.Web);
 
     // Debe coincidir con CreateStatusReportDto del lado de la API.
     // CreatedAt es el momento REAL en que se tomó la lectura (no cuando se
@@ -57,4 +62,59 @@ public static class ApiClient
 
     private static string Recortar(string texto)
         => texto.Length <= 200 ? texto : texto[..200] + "…";
+
+    // ---------------------------------------------------------------
+    // Enrolamiento (POST /clientcomputer/enroll y /confirm_enrollment)
+    // ---------------------------------------------------------------
+
+    // Debe coincidir con EnrollClientComputerDto del lado de la API.
+    public record EnrollRequestDto(string HostName, string IpAddress, string MacAddress, string Uuid);
+
+    // Debe coincidir con EnrollResponseDto del lado de la API.
+    public record EnrollResponseDto(int Id, string UsageCode, DateTime UsageCodeExpiration, string Message);
+
+    // Debe coincidir con ConfirmEnrollmentDto del lado de la API.
+    public record ConfirmEnrollmentRequestDto(int ClientId, string UsageCode);
+
+    // La API responde con un objeto anónimo { Message, ApiKey }; se define
+    // aquí la forma que toma una vez serializado, para poder deserializarlo.
+    public record ConfirmEnrollmentResponseDto(string Message, Guid ApiKey);
+
+    // POST /clientcomputer/enroll — registra (o actualiza) este equipo por su
+    // Uuid y devuelve un usageCode de un solo uso, válido 5 minutos, con el
+    // que se completa el enrolamiento en ConfirmEnrollmentAsync.
+    // Devuelve null si la API no respondió o rechazó la petición.
+    public static Task<EnrollResponseDto?> EnrollAsync(string urlBase, EnrollRequestDto identidad)
+        => PostAndReadAsync<EnrollResponseDto>($"{urlBase}/clientcomputer/enroll", identidad);
+
+    // POST /clientcomputer/confirm_enrollment — confirma el usageCode
+    // obtenido en EnrollAsync y devuelve el ApiKey definitivo del equipo.
+    // Devuelve null si el código ya expiró (5 min) o no coincide.
+    public static Task<ConfirmEnrollmentResponseDto?> ConfirmEnrollmentAsync(string urlBase, int clientId, string usageCode)
+        => PostAndReadAsync<ConfirmEnrollmentResponseDto>(
+            $"{urlBase}/clientcomputer/confirm_enrollment", new ConfirmEnrollmentRequestDto(clientId, usageCode));
+
+    private static async Task<TRespuesta?> PostAndReadAsync<TRespuesta>(string url, object cuerpo)
+        where TRespuesta : class
+    {
+        try
+        {
+            using HttpResponseMessage respuesta = await _http.PostAsJsonAsync(url, cuerpo);
+
+            if (!respuesta.IsSuccessStatusCode)
+            {
+                string detalle = await respuesta.Content.ReadAsStringAsync();
+                Console.WriteLine(
+                    $"[API] POST {url} -> {(int)respuesta.StatusCode} {respuesta.ReasonPhrase}. {Recortar(detalle)}");
+                return null;
+            }
+
+            return await respuesta.Content.ReadFromJsonAsync<TRespuesta>(_jsonWeb);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[API] No se pudo contactar {url}: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
 }

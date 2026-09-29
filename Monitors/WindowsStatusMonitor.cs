@@ -64,22 +64,38 @@ public static class WindowsStatusMonitor
         return 0f;
     }
 
-    // Retorna el porcentaje de uso de la RAM
+    // Retorna el porcentaje de uso de la RAM física.
+    //
+    // La librería expone VARIAS entradas de tipo Memory, cada una con su propio
+    // sensor de carga llamado "Memory": "Total Memory" y "Virtual Memory"
+    // (además de los módulos individuales, que no traen carga). Antes se
+    // devolvía la primera que apareciera, y en algunos equipos era
+    // "Virtual Memory" (memoria confirmada), que puede ser mucho mayor que la
+    // RAM realmente en uso (ej. 81% vs 61% en un equipo de 32 GB). Por eso se
+    // prefiere "Total Memory" por nombre; ver --sensores para comprobarlo.
     public static float GetRamUsage()
     {
         ActualizarLecturas();
 
-        foreach (IHardware hardware in _computer.Hardware)
-        {
-            if (hardware.HardwareType != HardwareType.Memory) continue;
+        var candidatos = _computer.Hardware
+            .Where(h => h.HardwareType == HardwareType.Memory)
+            .Select(h => (
+                Hardware: h,
+                Sensor: h.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Load && s.Name == "Memory")))
+            .Where(x => x.Sensor?.Value is float)
+            .ToList();
 
-            ISensor? uso = hardware.Sensors.FirstOrDefault(
-                s => s.SensorType == SensorType.Load && s.Name == "Memory");
+        // 1º "Total Memory"; 2º cualquiera que no sea "Virtual"; 3º lo que haya.
+        ISensor? elegido =
+            candidatos
+                .Where(x => x.Hardware.Name.Contains("Total", StringComparison.OrdinalIgnoreCase))
+                .Select(x => x.Sensor).FirstOrDefault()
+            ?? candidatos
+                .Where(x => !x.Hardware.Name.Contains("Virtual", StringComparison.OrdinalIgnoreCase))
+                .Select(x => x.Sensor).FirstOrDefault()
+            ?? candidatos.Select(x => x.Sensor).FirstOrDefault();
 
-            if (uso?.Value is float valor) return valor;
-        }
-
-        return 0f;
+        return elegido?.Value ?? 0f;
     }
 
     // Retorna el porcentaje de uso de la GPU (núcleo/core).
@@ -210,9 +226,21 @@ public static class WindowsStatusMonitor
                 string estado = TieneLecturaValida(sensor) ? "" : "   <-- lectura no válida";
                 Console.WriteLine($"    Temperatura · {sensor.Name}: {lectura}{estado}");
             }
+
+            // Para comparar con el Administrador de tareas: "Total Memory" debe
+            // coincidir con "En uso"; "Virtual Memory" con "Confirmada".
+            if (hardware.HardwareType == HardwareType.Memory)
+            {
+                foreach (ISensor sensor in sensores.Where(s => s.SensorType == SensorType.Load))
+                {
+                    string lectura = sensor.Value is float valor ? $"{valor:F1} %" : "sin valor";
+                    Console.WriteLine($"    Carga · {sensor.Name}: {lectura}");
+                }
+            }
         }
 
         Console.WriteLine();
+        Console.WriteLine($"RAM que se enviaría a la API: {GetRamUsage():F1} %");
         float temperatura = GetCpuTemperature();
         Console.WriteLine(temperatura > 0f
             ? $"Temperatura de CPU que se enviaría a la API: {temperatura:F1} °C"

@@ -9,6 +9,7 @@ public static class ApiClient
     private static readonly HttpClient _http = new()
     {
         Timeout = TimeSpan.FromSeconds(10),
+        DefaultRequestHeaders = { { "ngrok-skip-browser-warning", "true" } },
     };
 
     // La API serializa con camelCase (ej. "usageCode", "apiKey") y acepta el
@@ -23,16 +24,14 @@ public static class ApiClient
 
     // Debe coincidir con BatchStatusReportDto de la API: { "statusReports": [ ... ] }
     public record BatchStatusReportDto(List<StatusReportDto> StatusReports);
-
-    // POST /statusreport — una sola lectura. true si la API respondió 2xx.
     public static Task<bool> EnviarReporteAsync(string urlBase, StatusReportDto reporte)
-        => PostAsync($"{urlBase}/statusreport", reporte);
+        => PostAsync($"{urlBase}/agent/statusreport", reporte);
 
-    // POST /statusreport/batch — varias lecturas en una sola petición.
+    // POST /agent/statusreport/batch — varias lecturas en una sola petición.
     // La API acepta entre 1 y 500 por lote y lo guarda de forma atómica
     // (o entra todo el lote o no entra nada).
     public static Task<bool> EnviarLoteAsync(string urlBase, List<StatusReportDto> reportes)
-        => PostAsync($"{urlBase}/statusreport/batch", new BatchStatusReportDto(reportes));
+        => PostAsync($"{urlBase}/agent/statusreport/batch", new BatchStatusReportDto(reportes));
 
     private static async Task<bool> PostAsync<T>(string url, T cuerpo)
     {

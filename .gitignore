@@ -289,3 +289,7 @@ __pycache__/
 *.xsd.cs
 # Base de datos local del cliente
 *.db
+dist/
+logs/
+enrollment.dat
+appsettings.Production.json

@@ -13,9 +13,9 @@ namespace FaMaClientMonitor.Data;
 // el cliente maneje ninguna clave propia; Windows la deriva del equipo.
 //
 // Se usa DataProtectionScope.LocalMachine (no CurrentUser) porque este
-// programa puede ejecutarse bajo distintas cuentas (una sesión de usuario,
-// una tarea programada como SYSTEM, etc.) y en todos los casos debe poder
-// leer el mismo archivo. La contrapartida: cualquier proceso que corra en
+// programa puede ejecutarse bajo distintas cuentas (la de cada persona que
+// inicie sesión en el equipo) y en todos los casos debe poder leer el mismo
+// archivo. La contrapartida: cualquier proceso que corra en
 // esta misma máquina puede pedirle a Windows que lo descifre, igual que
 // ocurre con cualquier credencial guardada a nivel de equipo. Lo que si
 // protege de verdad es que el archivo, copiado a otro PC, quede inservible:

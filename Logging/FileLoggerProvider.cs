@@ -9,7 +9,7 @@ namespace FaMaClientMonitor.Logging;
 // Se usa JUNTO al logging de consola (que el Host agrega por defecto), no en
 // su lugar: en consola se ve en vivo mientras corres el programa a mano; el
 // archivo queda disponible para revisar después, que es lo que hace falta en
-// cuanto el cliente corra en segundo plano (tarea programada, servicio, etc.)
+// cuanto el cliente corra en segundo plano (lanzado oculto al iniciar sesión)
 // y no haya ninguna consola donde mirar.
 public sealed class FileLoggerProvider(string carpetaLogs) : ILoggerProvider
 {

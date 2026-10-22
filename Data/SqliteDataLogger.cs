@@ -1,4 +1,5 @@
 using System.Globalization;
+using FaMaClientMonitor.Monitors;
 using Microsoft.Data.Sqlite;
 
 namespace FaMaClientMonitor.Data;
@@ -50,10 +51,36 @@ public static class SqliteDataLogger
                 ram REAL NOT NULL,
                 cpu REAL NOT NULL,
                 gpu REAL NOT NULL,
-                temp REAL NOT NULL
+                temp REAL NOT NULL,
+                disk_activity REAL NOT NULL DEFAULT 0,
+                disk_response_ms REAL NOT NULL DEFAULT 0
             );
             """;
         comando.ExecuteNonQuery();
+
+        // Bases creadas antes de las métricas de disco: se agregan las columnas
+        // sin tocar las lecturas que ya estaban en cola (valen 0).
+        foreach (string columna in new[] { "disk_activity", "disk_response_ms" })
+        {
+            comando.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('pendientes') WHERE name = '{columna}';";
+            if (Convert.ToInt64(comando.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
+            {
+                comando.CommandText = $"ALTER TABLE pendientes ADD COLUMN {columna} REAL NOT NULL DEFAULT 0;";
+                comando.ExecuteNonQuery();
+            }
+        }
+
+        // Versión intermedia del cliente: guardaba también lectura/escritura en
+        // MB/s. Ya no se usan; se eliminan las columnas (SQLite 3.35+).
+        foreach (string columna in new[] { "disk_read_bps", "disk_write_bps" })
+        {
+            comando.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('pendientes') WHERE name = '{columna}';";
+            if (Convert.ToInt64(comando.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
+            {
+                comando.CommandText = $"ALTER TABLE pendientes DROP COLUMN {columna};";
+                comando.ExecuteNonQuery();
+            }
+        }
 
         _tablaCreada = true;
     }
@@ -61,7 +88,7 @@ public static class SqliteDataLogger
     // Guarda una lectura que no se pudo enviar, para reintentar después.
     // "momentoLectura" es la hora REAL en que se leyeron los sensores (UTC),
     // no la hora en que eventualmente se reintente el envío.
-    public static void GuardarPendiente(string rutaArchivo, int pcId, float ram, float cpu, float gpu, float temperatura, DateTime momentoLectura)
+    public static void GuardarPendiente(string rutaArchivo, int pcId, float ram, float cpu, float gpu, float temperatura, DiskMonitor.Lectura disco, DateTime momentoLectura)
     {
         lock (_bloqueo)
         {
@@ -73,8 +100,10 @@ public static class SqliteDataLogger
             using var comando = conexion.CreateCommand();
             comando.CommandText =
                 """
-                INSERT INTO pendientes (created_at, pc_id, ram, cpu, gpu, temp)
-                VALUES ($createdAt, $pcId, $ram, $cpu, $gpu, $temp);
+                INSERT INTO pendientes (created_at, pc_id, ram, cpu, gpu, temp,
+                                        disk_activity, disk_response_ms)
+                VALUES ($createdAt, $pcId, $ram, $cpu, $gpu, $temp,
+                        $diskActivity, $diskResponse);
                 """;
 
             // Formato "o" (round-trip ISO 8601) preserva la hora exacta y la
@@ -85,12 +114,16 @@ public static class SqliteDataLogger
             comando.Parameters.AddWithValue("$cpu", cpu);
             comando.Parameters.AddWithValue("$gpu", gpu);
             comando.Parameters.AddWithValue("$temp", temperatura);
+            comando.Parameters.AddWithValue("$diskActivity", disco.ActividadPct);
+            comando.Parameters.AddWithValue("$diskResponse", disco.RespuestaMs);
 
             comando.ExecuteNonQuery();
         }
     }
 
-    public record Pendiente(long Id, int PcId, float Ram, float Cpu, float Gpu, float Temp, DateTime CreatedAt);
+    public record Pendiente(
+        long Id, int PcId, float Ram, float Cpu, float Gpu, float Temp, DateTime CreatedAt,
+        float DiskActivity, float DiskResponseMs);
 
     // Retorna todas las lecturas que siguen esperando ser enviadas.
     public static List<Pendiente> ObtenerPendientes(string rutaArchivo)
@@ -103,7 +136,7 @@ public static class SqliteDataLogger
             conexion.Open();
 
             using var comando = conexion.CreateCommand();
-            comando.CommandText = "SELECT id, pc_id, ram, cpu, gpu, temp, created_at FROM pendientes ORDER BY id;";
+            comando.CommandText = "SELECT id, pc_id, ram, cpu, gpu, temp, created_at, disk_activity, disk_response_ms FROM pendientes ORDER BY id;";
 
             using var lector = comando.ExecuteReader();
             var resultado = new List<Pendiente>();
@@ -120,7 +153,9 @@ public static class SqliteDataLogger
                     lector.GetFloat(3),
                     lector.GetFloat(4),
                     lector.GetFloat(5),
-                    createdAt
+                    createdAt,
+                    lector.GetFloat(7),
+                    lector.GetFloat(8)
                 ));
             }
 

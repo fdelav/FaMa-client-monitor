@@ -16,6 +16,39 @@ if (args.Contains("--sensores"))
     return;
 }
 
+// Modo disco: `dotnet run -- --disco` muestra lo mismo que el Administrador de
+// tareas (Rendimiento > Disco) con una cuenta normal, sin enviar nada, y termina.
+if (args.Contains("--disco"))
+{
+    DiskMonitor.Info? info = DiskMonitor.ObtenerInfo();
+
+    if (info is null)
+    {
+        Console.WriteLine("No se pudo leer el disco del sistema por WMI en este equipo.");
+        return;
+    }
+
+    static string Gb(ulong bytes) => $"{bytes / 1_000_000_000.0:F0} GB";
+
+    Console.WriteLine($"Disco del sistema ({info.Instancia})");
+    Console.WriteLine($"  Modelo              : {info.Modelo}");
+    Console.WriteLine($"  Tipo                : {info.Tipo}");
+    Console.WriteLine($"  Capacidad           : {Gb(info.CapacidadBytes)}");
+    Console.WriteLine($"  Con formato         : {Gb(info.ConFormatoBytes)}");
+    Console.WriteLine($"  Archivo paginación  : {(info.ArchivoPaginacion ? "Sí" : "No")}");
+    Console.WriteLine();
+
+    DiskMonitor.Leer();   // muestra base: el tiempo de respuesta necesita dos lecturas
+    for (int i = 0; i < 5; i++)
+    {
+        await Task.Delay(1000);
+        DiskMonitor.Lectura d = DiskMonitor.Leer();
+        Console.WriteLine(
+            $"  Actividad {d.ActividadPct,3:F0} %   Respuesta {d.RespuestaMs,5:F1} ms");
+    }
+    return;
+}
+
 // Modo identidad: `dotnet run -- --identidad` muestra los datos con los que
 // este PC se enrolaría en la API (nombre, IP, MAC y UUID de la BIOS), sin
 // enviar nada, y termina.
@@ -45,15 +78,59 @@ if (args.Contains("--identidad"))
     return;
 }
 
+// Una sola copia por equipo. Este cliente NO es un servicio de Windows (instalar
+// uno exige Administrador): se lanza al iniciar la sesión del usuario, y en un
+// PC compartido dos sesiones abiertas a la vez, o un doble clic, arrancarían dos
+// copias que enviarían lecturas duplicadas. El mutex es "Global\" para verse
+// entre sesiones; si lo creó otra cuenta, abrirlo da UnauthorizedAccessException,
+// que también significa "ya hay una copia corriendo".
+// Los modos --sensores, --disco e --identidad (arriba) no pasan por aquí, así
+// que se pueden usar con el cliente ya en marcha.
+bool esLaPrimeraCopia;
+Mutex? copiaUnica = null;
+try
+{
+    copiaUnica = new Mutex(initiallyOwned: false, @"Global\FaMaClientMonitor", out esLaPrimeraCopia);
+}
+catch (UnauthorizedAccessException)
+{
+    esLaPrimeraCopia = false;
+}
+
+if (!esLaPrimeraCopia)
+{
+    Console.WriteLine("FaMa Client Monitor ya está corriendo en este equipo; esta copia se cierra.");
+    return;
+}
+
 // Monitoreo continuo: se arma como un Host genérico de .NET, que se encarga
-// de arrancar el Worker, de manejar Ctrl+C (o la señal de parada que mande
-// Windows) con cancelación ordenada, y de la inyección de ILogger.
+// de arrancar el Worker, de manejar Ctrl+C con cancelación ordenada, y de la
+// inyección de ILogger.
 //
 // El Host agrega por defecto un logger de consola (mismo comportamiento que
 // antes al correr `dotnet run` a mano); AddFile suma un archivo de log en
-// disco, para poder revisar qué pasó cuando esto corra en segundo plano y no
-// haya ninguna consola donde mirar.
-var builder = Host.CreateApplicationBuilder(args);
+// disco, para poder revisar qué pasó cuando esto corra oculto (lanzado al
+// iniciar sesión, sin ventana) y no haya ninguna consola donde mirar.
+//
+// ContentRootPath se fija a la carpeta del .exe a propósito: por defecto el Host
+// busca appsettings.json en la carpeta DESDE DONDE se lanzó el programa, y un
+// arranque automático puede lanzarlo con otra carpeta de trabajo (por ejemplo
+// C:\Windows\System32), así que la configuración se ignoraría en silencio.
+var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+});
+
+// Compatibilidad: las variables de entorno que ya se venían usando
+// (FAMA_API_URL, FAMA_PC_ID) siguen funcionando y tienen prioridad sobre el JSON.
+string? urlEntorno = Environment.GetEnvironmentVariable("FAMA_API_URL");
+if (!string.IsNullOrWhiteSpace(urlEntorno)) builder.Configuration["FaMa:ApiUrl"] = urlEntorno;
+
+string? pcIdEntorno = Environment.GetEnvironmentVariable("FAMA_PC_ID");
+if (!string.IsNullOrWhiteSpace(pcIdEntorno)) builder.Configuration["FaMa:PcIdManual"] = pcIdEntorno;
+
+builder.Services.Configure<FaMaOptions>(builder.Configuration.GetSection(FaMaOptions.Seccion));
 
 builder.Logging.AddFile(Path.Combine(AppContext.BaseDirectory, "logs"));
 
@@ -61,3 +138,6 @@ builder.Services.AddHostedService<MonitorWorker>();
 
 using IHost host = builder.Build();
 await host.RunAsync();
+
+// El mutex debe seguir vivo mientras el programa corre; se libera al terminar.
+GC.KeepAlive(copiaUnica);

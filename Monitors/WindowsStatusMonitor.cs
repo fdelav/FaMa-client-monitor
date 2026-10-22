@@ -1,3 +1,5 @@
+using System.Management;
+using System.Runtime.Versioning;
 using System.Security.Principal;
 using LibreHardwareMonitor.Hardware;
 
@@ -46,10 +48,17 @@ public static class WindowsStatusMonitor
         }
     }
 
-    // Retorna el porcentaje de uso de CPU (0.0 a 100.0)
-    public static float GetCpuUsage()
+    // Refresca todos los sensores UNA vez. El Worker lo llama una sola vez por
+    // lectura y luego consulta CPU, RAM, GPU y temperatura con actualizar:false;
+    // así no se recorre el hardware completo una vez por cada valor.
+    public static void Actualizar() => ActualizarLecturas();
+
+    // Retorna el porcentaje de uso de CPU (0.0 a 100.0).
+    // Todos los Get* aceptan actualizar:false para reutilizar la última
+    // actualización (ver Actualizar()); por defecto refrescan por su cuenta.
+    public static float GetCpuUsage(bool actualizar = true)
     {
-        ActualizarLecturas();
+        if (actualizar) ActualizarLecturas();
 
         foreach (IHardware hardware in _computer.Hardware)
         {
@@ -64,46 +73,30 @@ public static class WindowsStatusMonitor
         return 0f;
     }
 
-    // Retorna el porcentaje de uso de la RAM física.
-    //
-    // La librería expone VARIAS entradas de tipo Memory, cada una con su propio
-    // sensor de carga llamado "Memory": "Total Memory" y "Virtual Memory"
-    // (además de los módulos individuales, que no traen carga). Antes se
-    // devolvía la primera que apareciera, y en algunos equipos era
-    // "Virtual Memory" (memoria confirmada), que puede ser mucho mayor que la
-    // RAM realmente en uso (ej. 81% vs 61% en un equipo de 32 GB). Por eso se
-    // prefiere "Total Memory" por nombre; ver --sensores para comprobarlo.
-    public static float GetRamUsage()
+    // Retorna el porcentaje de uso de la RAM
+    public static float GetRamUsage(bool actualizar = true)
     {
-        ActualizarLecturas();
+        if (actualizar) ActualizarLecturas();
 
-        var candidatos = _computer.Hardware
-            .Where(h => h.HardwareType == HardwareType.Memory)
-            .Select(h => (
-                Hardware: h,
-                Sensor: h.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Load && s.Name == "Memory")))
-            .Where(x => x.Sensor?.Value is float)
-            .ToList();
+        foreach (IHardware hardware in _computer.Hardware)
+        {
+            if (hardware.HardwareType != HardwareType.Memory) continue;
 
-        // 1º "Total Memory"; 2º cualquiera que no sea "Virtual"; 3º lo que haya.
-        ISensor? elegido =
-            candidatos
-                .Where(x => x.Hardware.Name.Contains("Total", StringComparison.OrdinalIgnoreCase))
-                .Select(x => x.Sensor).FirstOrDefault()
-            ?? candidatos
-                .Where(x => !x.Hardware.Name.Contains("Virtual", StringComparison.OrdinalIgnoreCase))
-                .Select(x => x.Sensor).FirstOrDefault()
-            ?? candidatos.Select(x => x.Sensor).FirstOrDefault();
+            ISensor? uso = hardware.Sensors.FirstOrDefault(
+                s => s.SensorType == SensorType.Load && s.Name == "Memory");
 
-        return elegido?.Value ?? 0f;
+            if (uso?.Value is float valor) return valor;
+        }
+
+        return 0f;
     }
 
     // Retorna el porcentaje de uso de la GPU (núcleo/core).
     // Si el equipo tiene varias GPUs (ej. integrada + dedicada), retorna
     // la primera con lectura de carga disponible.
-    public static float GetGpuUsage()
+    public static float GetGpuUsage(bool actualizar = true)
     {
-        ActualizarLecturas();
+        if (actualizar) ActualizarLecturas();
 
         HardwareType[] tiposGpu =
         [
@@ -151,13 +144,34 @@ public static class WindowsStatusMonitor
     // Retorna la temperatura general del CPU en grados Celsius, o 0 si no hay
     // ninguna lectura válida (ver ImprimirDiagnostico para saber por qué).
     //
-    // Para leer la temperatura del CPU hacen falta DOS cosas:
-    //   1. Ejecutar como Administrador.
-    //   2. Tener instalado el driver PawnIO (LibreHardwareMonitorLib 0.9.5+
-    //      lo usa en lugar de WinRing0): winget install PawnIO.PawnIO
-    public static float GetCpuTemperature()
+    // Orden de fuentes (de más a menos fiable):
+    //   1. LibreHardwareMonitor: temperatura REAL del CPU. Necesita el driver
+    //      PawnIO instalado y que el proceso corra como Administrador o SYSTEM.
+    //      Solo se intenta si el proceso ya está elevado, así en una cuenta
+    //      normal nunca se toca el acceso a hardware de bajo nivel.
+    //   2. Contador "Thermal Zone Information" (WMI root\CIMV2): no requiere
+    //      Administrador, pero es la zona térmica que reporta el firmware (a
+    //      menudo placa/chasis, no el núcleo del CPU) y varía poco con la carga.
+    //   3. ACPI MSAcpi_ThermalZoneTemperature (WMI root\WMI): misma idea que la
+    //      anterior, pero Windows SOLO deja consultarla elevado.
+    // En los equipos institucionales el cliente corre SIN Administrador (no hay
+    // servicio, ni tarea como SYSTEM, ni driver), así que la única fuente que
+    // aplica allí es la 2. Las fuentes 1 y 3 quedan para pruebas en un equipo
+    // propio abierto como Administrador.
+    public static float GetCpuTemperature(bool actualizar = true)
     {
-        ActualizarLecturas();
+        bool elevado = EsAdministrador();
+
+        if (elevado && GetCpuTemperatureViaLibreHardwareMonitor(actualizar) is float real) return real;
+        if (GetCpuTemperatureViaThermalZoneCounter() is float zona) return zona;
+        if (elevado && GetCpuTemperatureViaWmiAcpi() is float acpi) return acpi;
+
+        return 0f;
+    }
+
+    private static float? GetCpuTemperatureViaLibreHardwareMonitor(bool actualizar = true)
+    {
+        if (actualizar) ActualizarLecturas();
 
         foreach (IHardware hardware in _computer.Hardware)
         {
@@ -181,7 +195,88 @@ public static class WindowsStatusMonitor
             return validos.Max(s => s.Value.GetValueOrDefault());
         }
 
-        return 0f;
+        return null;
+    }
+
+    // Contador de rendimiento "Thermal Zone Information" expuesto por WMI en
+    // root\CIMV2 (a diferencia de root\WMI, no suele exigir Administrador).
+    // Temperature viene en Kelvin. Si hay varias zonas se toma la más caliente.
+    [SupportedOSPlatform("windows")]
+    private static float? GetCpuTemperatureViaThermalZoneCounter()
+    {
+        try
+        {
+            using var buscador = new ManagementObjectSearcher(
+                @"root\CIMV2", "SELECT Name, Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation");
+
+            float? maxima = null;
+
+            foreach (ManagementBaseObject zona in buscador.Get())
+            {
+                using (zona)
+                {
+                    if (zona["Temperature"] is not (byte or ushort or uint or ulong)) continue;
+
+                    float celsius = (float)(Convert.ToDouble(zona["Temperature"]) - 273.15);
+
+                    if (celsius >= TempMinValida && celsius <= TempMaxValida)
+                    {
+                        maxima = maxima is null ? celsius : Math.Max(maxima.Value, celsius);
+                    }
+                }
+            }
+
+            return maxima;
+        }
+        catch (ManagementException)
+        {
+            // La clase no existe en este equipo.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Falta permiso para consultarla.
+        }
+
+        return null;
+    }
+
+    // Zona térmica ACPI (MSAcpi_ThermalZoneTemperature, WMI root\WMI). No necesita
+    // driver, pero Windows solo deja consultarla elevado (Administrador/SYSTEM);
+    // sin eso lanza "acceso denegado". CurrentTemperature viene en décimas de
+    // Kelvin. Puede no existir o devolver un valor fijo de relleno, por eso se
+    // valida el rango.
+    [SupportedOSPlatform("windows")]
+    private static float? GetCpuTemperatureViaWmiAcpi()
+    {
+        try
+        {
+            using var buscador = new ManagementObjectSearcher(
+                @"root\WMI", "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
+
+            foreach (ManagementBaseObject zona in buscador.Get())
+            {
+                using (zona)
+                {
+                    if (zona["CurrentTemperature"] is not (byte or ushort or uint or ulong)) continue;
+
+                    double deciKelvin = Convert.ToDouble(zona["CurrentTemperature"]);
+                    double celsius = (deciKelvin / 10.0) - 273.15;
+
+                    if (celsius >= TempMinValida && celsius <= TempMaxValida)
+                        return (float)celsius;
+                }
+            }
+        }
+        catch (ManagementException)
+        {
+            // La clase MSAcpi_ThermalZoneTemperature no existe en este equipo.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Falta permiso para consultar ese namespace de WMI en este equipo.
+        }
+
+        return null;
     }
 
     // ¿El proceso corre con permisos de Administrador? Sin ellos el driver de
@@ -226,25 +321,35 @@ public static class WindowsStatusMonitor
                 string estado = TieneLecturaValida(sensor) ? "" : "   <-- lectura no válida";
                 Console.WriteLine($"    Temperatura · {sensor.Name}: {lectura}{estado}");
             }
-
-            // Para comparar con el Administrador de tareas: "Total Memory" debe
-            // coincidir con "En uso"; "Virtual Memory" con "Confirmada".
-            if (hardware.HardwareType == HardwareType.Memory)
-            {
-                foreach (ISensor sensor in sensores.Where(s => s.SensorType == SensorType.Load))
-                {
-                    string lectura = sensor.Value is float valor ? $"{valor:F1} %" : "sin valor";
-                    Console.WriteLine($"    Carga · {sensor.Name}: {lectura}");
-                }
-            }
         }
 
         Console.WriteLine();
-        Console.WriteLine($"RAM que se enviaría a la API: {GetRamUsage():F1} %");
+        bool elevado = EsAdministrador();
+        Console.WriteLine($"Proceso elevado (Administrador/SYSTEM): {(elevado ? "sí" : "no")}");
+        Console.WriteLine("Fuentes de temperatura, en el orden en que se usan:");
+
+        float? real = elevado ? GetCpuTemperatureViaLibreHardwareMonitor() : null;
+        Console.WriteLine(!elevado
+            ? "  1) LibreHardwareMonitor (CPU real): no se intenta, requiere Administrador/SYSTEM"
+            : real is float r ? $"  1) LibreHardwareMonitor (CPU real): {r:F1} °C"
+            : "  1) LibreHardwareMonitor (CPU real): sin lectura (¿falta el driver PawnIO?)");
+
+        float? zona = GetCpuTemperatureViaThermalZoneCounter();
+        Console.WriteLine(zona is float z
+            ? $"  2) Contador Thermal Zone Information (sin Administrador): {z:F1} °C"
+            : "  2) Contador Thermal Zone Information (sin Administrador): sin lectura en este equipo");
+
+        float? acpi = elevado ? GetCpuTemperatureViaWmiAcpi() : null;
+        Console.WriteLine(!elevado
+            ? "  3) ACPI MSAcpi_ThermalZoneTemperature: no se intenta, Windows exige Administrador"
+            : acpi is float a ? $"  3) ACPI MSAcpi_ThermalZoneTemperature: {a:F1} °C"
+            : "  3) ACPI MSAcpi_ThermalZoneTemperature: sin lectura en este equipo");
+
+        Console.WriteLine();
         float temperatura = GetCpuTemperature();
         Console.WriteLine(temperatura > 0f
             ? $"Temperatura de CPU que se enviaría a la API: {temperatura:F1} °C"
-            : "Temperatura de CPU que se enviaría a la API: 0 (no hay ninguna lectura válida)");
+            : "Temperatura de CPU que se enviaría a la API: 0 (ninguna fuente tuvo lectura válida)");
     }
 
     // Libera los recursos de LibreHardwareMonitorLib. Llamar al cerrar la app.

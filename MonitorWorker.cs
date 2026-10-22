@@ -1,97 +1,182 @@
+using System.Text.Json;
 using FaMaClientMonitor.Api;
 using FaMaClientMonitor.Data;
 using FaMaClientMonitor.Monitors;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace FaMaClientMonitor;
 
 // Toda la lógica de monitoreo vive aquí: enrolamiento, lectura de sensores,
-// envío a la API y cola local de reintentos. Al ser un BackgroundService, el
-// Host de .NET se encarga de arrancarlo y de detenerlo con cancelación
-// ordenada (Ctrl+C en consola, o la señal de parada que mande Windows si más
-// adelante esto se instala como servicio o se lanza desde una tarea
-// programada). Antes esto vivía suelto en Program.cs con un CancellationTokenSource manual.
-public sealed class MonitorWorker(ILogger<MonitorWorker> logger) : BackgroundService
+// cola local y envío a la API. Al ser un BackgroundService, el Host de .NET se
+// encarga de arrancarlo y de detenerlo con cancelación ordenada (Ctrl+C en
+// consola; al cerrar la sesión de Windows el proceso termina y la cola local
+// conserva lo que no alcanzó a enviarse).
+//
+// Hay DOS bucles independientes que se comunican por la cola local (SQLite):
+//   - Lectura (cada IntervaloLecturaSegundos, 10 s por defecto): lee los
+//     sensores y guarda la lectura en la cola. Nunca espera a la red.
+//   - Envío (cada IntervaloEnvioSegundos, 60 s por defecto): manda todo lo
+//     acumulado en lotes a /agent/statusreport/batch y borra de la cola lo que
+//     la API aceptó. Si la API no responde, las lecturas siguen en la cola y
+//     se reintenta en el siguiente envío. Si el programa se cierra de golpe,
+//     lo leído hasta ese momento tampoco se pierde.
+public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOptions> opciones) : BackgroundService
 {
-    private const int IntervaloSegundos = 60;
-    private const int TamanoLote = 100; // la API acepta hasta 500 por lote
+    // La API acepta entre 1 y 500 lecturas por lote.
+    private const int TamanoLoteMaximo = 500;
+    private const int IntervaloMinimoSegundos = 5;
+
+    private readonly FaMaOptions _config = opciones.Value;
+    private int _tamanoLote;
+    private int _intervaloLecturaSegundos;
+    private int _intervaloEnvioSegundos;
+
+    // Identidad de este equipo ante la API. Son campos (no variables locales)
+    // porque pueden cambiar mientras el programa corre: si la API no estaba
+    // disponible al arrancar, el enrolamiento se reintenta en cada envío; y si
+    // la API rechaza el ApiKey (401), se borra y se vuelve a enrolar. Solo el
+    // bucle de envío los modifica (después del arranque).
+    private int _pcId;
+    private Guid? _apiKey;
+    private int _pcIdManual;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         string rutaBaseDeDatos = Path.Combine(AppContext.BaseDirectory, "monitoreo.db");
 
-        // Configuración por variables de entorno (sin recompilar para cada equipo):
-        //   FAMA_API_URL  ej. http://192.168.1.50:5000   (por defecto http://localhost:5000)
-        //   FAMA_PC_ID    ej. 7                          (por defecto 1; solo se usa si el enrolamiento falla)
-        string urlApi = (Environment.GetEnvironmentVariable("FAMA_API_URL") ?? "http://localhost:5000").TrimEnd('/');
-        int pcIdManual = int.TryParse(Environment.GetEnvironmentVariable("FAMA_PC_ID"), out int pcIdConfigurado)
-            ? pcIdConfigurado : 1;
+        // La configuración viene de appsettings.json (ver FaMaOptions).
+        string urlApi = (_config.ApiUrl ?? string.Empty).Trim().TrimEnd('/');
 
-        int pcId = await ResolverPcIdAsync(urlApi, pcIdManual);
+        if (!Uri.TryCreate(urlApi, UriKind.Absolute, out Uri? uriApi)
+            || (uriApi.Scheme != Uri.UriSchemeHttp && uriApi.Scheme != Uri.UriSchemeHttps))
+        {
+            // Mejor detenerse con un mensaje claro que enviar a una dirección equivocada.
+            throw new InvalidOperationException(
+                $"FaMa:ApiUrl no es una URL http/https válida: \"{_config.ApiUrl}\". Revisa appsettings.json.");
+        }
+
+        _pcIdManual = _config.PcIdManual;
+
+        _intervaloLecturaSegundos = Math.Max(_config.IntervaloLecturaSegundos, IntervaloMinimoSegundos);
+        _intervaloEnvioSegundos = Math.Max(_config.IntervaloEnvioSegundos, IntervaloMinimoSegundos);
+        _tamanoLote = Math.Clamp(_config.TamanoLote, 1, TamanoLoteMaximo);
+
+        if (_intervaloLecturaSegundos != _config.IntervaloLecturaSegundos
+            || _intervaloEnvioSegundos != _config.IntervaloEnvioSegundos
+            || _tamanoLote != _config.TamanoLote)
+        {
+            logger.LogWarning(
+                "Configuración ajustada a los límites permitidos: IntervaloLecturaSegundos={Lectura}, IntervaloEnvioSegundos={Envio} (mínimo {Min} s), TamanoLote={Lote} (1 a {Max}).",
+                _intervaloLecturaSegundos, _intervaloEnvioSegundos, IntervaloMinimoSegundos, _tamanoLote, TamanoLoteMaximo);
+        }
+
+        ApiClient.Registrar = mensaje => logger.LogWarning("{Mensaje}", mensaje);
+
+        await AsegurarEnrolamientoAsync(urlApi);
 
         logger.LogInformation("FaMa Client Monitor — registrando datos reales de hardware");
-        logger.LogInformation("PC Id: {PcId}", pcId);
-        logger.LogInformation("Enviando a la API en: {UrlApi}", urlApi);
-        logger.LogInformation("Respaldo local (si la API no responde) en: {Ruta}", rutaBaseDeDatos);
+        logger.LogInformation("PC Id: {PcId}", _pcId);
+        logger.LogInformation(
+            "Lectura cada {Lectura} s; envío en lotes cada {Envio} s (hasta {Lote} lecturas por petición) a: {UrlApi}",
+            _intervaloLecturaSegundos, _intervaloEnvioSegundos, _tamanoLote, urlApi);
+        logger.LogInformation("Cola local (lecturas por enviar) en: {Ruta}", rutaBaseDeDatos);
 
         if (!WindowsStatusMonitor.EsAdministrador())
         {
-            logger.LogWarning("El programa NO se ejecuta como Administrador; la temperatura del CPU se enviará como 0.");
+            logger.LogInformation("El programa no se ejecuta como Administrador (es lo esperado en los equipos institucionales): la temperatura real del CPU no estará disponible; se intentará la zona térmica del sistema.");
         }
 
-        // Para avisar UNA vez cuando falta la temperatura (y otra si se recupera y se vuelve a perder).
-        bool avisoTemperaturaMostrado = false;
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                avisoTemperaturaMostrado = await EjecutarCicloAsync(urlApi, pcId, rutaBaseDeDatos, avisoTemperaturaMostrado);
-            }
-            catch (Exception ex)
-            {
-                // Un ciclo corrupto (ej. un sensor que lanzó una excepción rara)
-                // no debe tumbar el servicio completo: se registra y se sigue
-                // en el siguiente ciclo. Esto es más importante ahora que antes,
-                // porque en segundo plano nadie ve un error y reinicia a mano.
-                logger.LogError(ex, "Error inesperado en un ciclo de monitoreo; se continúa en el siguiente.");
-            }
-
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(IntervaloSegundos), stoppingToken);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
-        }
+        // Cada bucle tiene su propio ritmo; el de envío puede tardar (timeouts de
+        // red) sin retrasar nunca las lecturas.
+        Task bucleDeEnvio = BucleDeEnvioAsync(urlApi, rutaBaseDeDatos, stoppingToken);
+        await BucleDeLecturaAsync(rutaBaseDeDatos, stoppingToken);
+        await bucleDeEnvio;
 
         WindowsStatusMonitor.Cerrar();
         logger.LogInformation("Monitoreo detenido.");
     }
 
-    // Devuelve el nuevo valor de avisoTemperaturaMostrado (los métodos async no
-    // admiten parámetros ref/out, así que el estado viaja como valor de retorno).
-    private async Task<bool> EjecutarCicloAsync(string urlApi, int pcId, string rutaBaseDeDatos, bool avisoTemperaturaMostrado)
+    // Lee los sensores a un ritmo fijo. PeriodicTimer mantiene el intervalo sin
+    // acumular desfase aunque una lectura tarde un poco.
+    private async Task BucleDeLecturaAsync(string rutaBaseDeDatos, CancellationToken stoppingToken)
     {
-        // Se captura el momento exacto de la lectura ANTES de intentar
-        // enviarla — así, si termina en la cola de pendientes y se reenvía
-        // minutos/horas después, la API sigue recibiendo la hora real en que
-        // se tomó la muestra, no la hora del reenvío.
+        // Para avisar UNA vez cuando falta la temperatura (y otra si se recupera y se vuelve a perder).
+        bool avisoTemperaturaMostrado = false;
+
+        using var temporizador = new PeriodicTimer(TimeSpan.FromSeconds(_intervaloLecturaSegundos));
+
+        do
+        {
+            try
+            {
+                avisoTemperaturaMostrado = TomarLectura(rutaBaseDeDatos, avisoTemperaturaMostrado);
+            }
+            catch (Exception ex)
+            {
+                // Una lectura corrupta (ej. un sensor que lanzó una excepción rara)
+                // no debe tumbar el programa: se registra y se sigue con la siguiente.
+                logger.LogError(ex, "Error inesperado al leer los sensores; se continúa con la siguiente lectura.");
+            }
+        }
+        while (await EsperarSiguienteAsync(temporizador, stoppingToken));
+    }
+
+    // Envía lo acumulado en la cola. La primera vez corre al arrancar, así que
+    // si quedaron lecturas de una ejecución anterior se mandan enseguida.
+    private async Task BucleDeEnvioAsync(string urlApi, string rutaBaseDeDatos, CancellationToken stoppingToken)
+    {
+        using var temporizador = new PeriodicTimer(TimeSpan.FromSeconds(_intervaloEnvioSegundos));
+
+        do
+        {
+            try
+            {
+                await EnviarPendientesAsync(urlApi, rutaBaseDeDatos);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Error inesperado al enviar lecturas; se reintentará en el próximo envío.");
+            }
+        }
+        while (await EsperarSiguienteAsync(temporizador, stoppingToken));
+    }
+
+    // true = hubo otro tick; false = se pidió detener el programa.
+    private static async Task<bool> EsperarSiguienteAsync(PeriodicTimer temporizador, CancellationToken stoppingToken)
+    {
+        try
+        {
+            return await temporizador.WaitForNextTickAsync(stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    // Lee los sensores y guarda la lectura en la cola. Devuelve el nuevo valor
+    // de avisoTemperaturaMostrado.
+    private bool TomarLectura(string rutaBaseDeDatos, bool avisoTemperaturaMostrado)
+    {
+        // Se captura el momento exacto de la lectura ANTES de leer: es la hora
+        // que verá la API, aunque el envío ocurra segundos o minutos después.
         DateTime momentoLectura = DateTime.UtcNow;
 
-        float cpu = Limpiar(WindowsStatusMonitor.GetCpuUsage());
-        float ram = Limpiar(WindowsStatusMonitor.GetRamUsage());
-        float gpu = Limpiar(WindowsStatusMonitor.GetGpuUsage());
-        float temperatura = Limpiar(WindowsStatusMonitor.GetCpuTemperature());
+        // Un solo refresco del hardware por lectura; luego se consulta cada valor.
+        WindowsStatusMonitor.Actualizar();
+
+        float cpu = Limpiar(WindowsStatusMonitor.GetCpuUsage(actualizar: false));
+        float ram = Limpiar(WindowsStatusMonitor.GetRamUsage(actualizar: false));
+        float gpu = Limpiar(WindowsStatusMonitor.GetGpuUsage(actualizar: false));
+        float temperatura = Limpiar(WindowsStatusMonitor.GetCpuTemperature(actualizar: false));
 
         if (temperatura <= 0f && !avisoTemperaturaMostrado)
         {
             logger.LogWarning(WindowsStatusMonitor.EsAdministrador()
-                ? "No hay lectura válida de temperatura del CPU pese a ser Administrador. Puede faltar el driver PawnIO (winget install PawnIO.PawnIO). Ejecuta con --sensores para ver qué sensores detecta."
-                : "Sin permisos de Administrador la temperatura del CPU se envía como 0.");
+                ? "No hay lectura válida de temperatura en ninguna fuente. Puede faltar el driver PawnIO (winget install PawnIO.PawnIO). Ejecuta con --sensores para ver el detalle."
+                : "Sin Administrador/SYSTEM no hay temperatura real del CPU y este equipo no expone una zona térmica legible: se envía como 0. Ejecuta con --sensores para ver el detalle.");
             avisoTemperaturaMostrado = true;
         }
         else if (temperatura > 0f)
@@ -99,45 +184,85 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger) : BackgroundSer
             avisoTemperaturaMostrado = false;
         }
 
-        var reporte = new ApiClient.StatusReportDto(pcId, ram, cpu, gpu, temperatura, momentoLectura);
-        bool enviado = await ApiClient.EnviarReporteAsync(urlApi, reporte);
+        // Disco del sistema (actividad y tiempo de respuesta).
+        // Si no se puede leer devuelve ceros; no interrumpe el monitoreo.
+        DiskMonitor.Lectura disco = DiskMonitor.Leer();
 
-        if (enviado)
-        {
-            logger.LogInformation(
-                "Enviado a la API — CPU={Cpu:F1}%  RAM={Ram:F1}%  GPU={Gpu:F1}%  Temp={Temp:F1}°C", cpu, ram, gpu, temperatura);
-        }
-        else
-        {
-            SqliteDataLogger.GuardarPendiente(rutaBaseDeDatos, pcId, ram, cpu, gpu, temperatura, momentoLectura);
-            logger.LogWarning("No se pudo enviar — guardado localmente como pendiente");
-        }
+        // El PcId guardado aquí es informativo: al enviar se usa el vigente (ver EnviarPendientesAsync).
+        SqliteDataLogger.GuardarPendiente(rutaBaseDeDatos, _pcId, ram, cpu, gpu, temperatura, disco, momentoLectura);
 
-        // Solo se reintenta la cola cuando la API acaba de responder bien: si
-        // el envío de arriba falló, insistir solo gastaría otro timeout.
-        // Los pendientes se envían por lotes (menos peticiones) y, si un lote
-        // falla, se corta y se vuelve a intentar en el próximo ciclo.
-        if (!enviado) return avisoTemperaturaMostrado;
-
-        var pendientes = SqliteDataLogger.ObtenerPendientes(rutaBaseDeDatos);
-        if (pendientes.Count == 0) return avisoTemperaturaMostrado;
-
-        logger.LogInformation("Reintentando {Cantidad} lectura(s) pendiente(s)...", pendientes.Count);
-
-        foreach (var lote in pendientes.Chunk(TamanoLote))
-        {
-            var reportesLote = lote
-                .Select(p => new ApiClient.StatusReportDto(p.PcId, p.Ram, p.Cpu, p.Gpu, p.Temp, p.CreatedAt))
-                .ToList();
-
-            bool loteEnviado = await ApiClient.EnviarLoteAsync(urlApi, reportesLote);
-            if (!loteEnviado) break;
-
-            SqliteDataLogger.EliminarPendientes(rutaBaseDeDatos, lote.Select(p => p.Id));
-            logger.LogInformation("Lote de {Cantidad} pendiente(s) reenviado y eliminado de la cola local", lote.Length);
-        }
+        logger.LogInformation(
+            "Lectura — CPU={Cpu:F1}%  RAM={Ram:F1}%  GPU={Gpu:F1}%  Temp={Temp:F1}°C  Disco={Act:F0}% act, {Resp:F1} ms",
+            cpu, ram, gpu, temperatura,
+            disco.ActividadPct, disco.RespuestaMs);
 
         return avisoTemperaturaMostrado;
+    }
+
+    // Envía todo lo acumulado en la cola, en lotes de hasta _tamanoLote
+    // lecturas. Si un lote falla se corta: lo no enviado sigue en la cola y se
+    // reintenta en el siguiente envío (así una API caída cuesta un solo
+    // timeout por envío y no uno por lote).
+    private async Task EnviarPendientesAsync(string urlApi, string rutaBaseDeDatos)
+    {
+        // Sin ApiKey la API de producción rechaza todo con 401: si el
+        // enrolamiento no se pudo hacer antes (API caída al arrancar, o se
+        // borró por un 401), se reintenta ahora, una vez por envío.
+        if (_apiKey is null) await AsegurarEnrolamientoAsync(urlApi);
+
+        List<SqliteDataLogger.Pendiente> pendientes = SqliteDataLogger.ObtenerPendientes(rutaBaseDeDatos);
+        if (pendientes.Count == 0) return;
+
+        int enviadas = 0;
+
+        foreach (var lote in pendientes.Chunk(_tamanoLote))
+        {
+            // Se usa el PcId vigente y no el guardado con cada lectura: son
+            // todas de este mismo equipo, y si se guardaron antes de enrolarse
+            // (PcId manual) o antes de un re-enrolamiento, el guardado ya no
+            // identifica a este PC y mandarlo ensuciaría los datos de otro.
+            var reportesLote = lote
+                .Select(p => new ApiClient.StatusReportDto(
+                    _pcId, p.Ram, p.Cpu, p.Gpu, p.Temp, p.CreatedAt,
+                    p.DiskActivity, p.DiskResponseMs))
+                .ToList();
+
+            if (_config.MostrarJson)
+            {
+                logger.LogInformation("JSON a enviar a {Url}/agent/statusreport/batch: {Json}",
+                    urlApi, JsonSerializer.Serialize(new ApiClient.BatchStatusReportDto(reportesLote), JsonSerializerOptions.Web));
+            }
+
+            ApiClient.ResultadoEnvio resultado = await ApiClient.EnviarLoteAsync(urlApi, reportesLote, _apiKey);
+
+            if (resultado == ApiClient.ResultadoEnvio.NoAutorizado) ReiniciarEnrolamientoPorRechazo();
+
+            if (resultado != ApiClient.ResultadoEnvio.Enviado)
+            {
+                logger.LogWarning(
+                    "No se pudo enviar el lote; quedan {Cantidad} lectura(s) en la cola local y se reintentará en {Segundos} s.",
+                    pendientes.Count - enviadas, _intervaloEnvioSegundos);
+                return;
+            }
+
+            SqliteDataLogger.EliminarPendientes(rutaBaseDeDatos, lote.Select(p => p.Id));
+            enviadas += lote.Length;
+        }
+
+        logger.LogInformation("Enviado a la API — {Cantidad} lectura(s) en lote(s) de hasta {Lote}", enviadas, _tamanoLote);
+    }
+
+    // Si la API rechaza el ApiKey (401) el enrolamiento guardado ya no sirve
+    // (por ejemplo, la base de datos del servidor se reinició). Se borra para
+    // que el próximo envío enrole de nuevo; reintentar con la misma clave
+    // solo acumularía lecturas en la cola local sin que nunca se envíen.
+    private void ReiniciarEnrolamientoPorRechazo()
+    {
+        if (_apiKey is null) return;   // sin clave no hay nada que invalidar
+
+        logger.LogWarning("La API rechazó el ApiKey de este equipo (401). Se descarta el enrolamiento y se volverá a enrolar.");
+        EnrollmentStore.Eliminar();
+        _apiKey = null;
     }
 
     // Enrolamiento: si este equipo no tiene un enrolamiento guardado (o quedó
@@ -145,10 +270,22 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger) : BackgroundSer
     // un proceso de dos pasos contra la API: /clientcomputer/enroll entrega un
     // usageCode de un solo uso (válido 5 min), que se confirma de inmediato en
     // /clientcomputer/confirm_enrollment para obtener el ApiKey definitivo.
-    private async Task<int> ResolverPcIdAsync(string urlApi, int pcIdManual)
+    //
+    // Deja en _pcId/_apiKey el resultado. Si no se logra (API caída), queda
+    // _apiKey = null y _pcId = el PcId manual; el Worker lo reintenta en el
+    // siguiente envío.
+    private async Task AsegurarEnrolamientoAsync(string urlApi)
     {
         EnrollmentStore.Enrollment? enrolamiento = EnrollmentStore.Cargar();
-        if (enrolamiento is not null) return enrolamiento.ClientId;
+        if (enrolamiento is not null)
+        {
+            _pcId = enrolamiento.ClientId;
+            _apiKey = enrolamiento.ApiKey;
+            return;
+        }
+
+        _pcId = _pcIdManual;
+        _apiKey = null;
 
         logger.LogInformation("Este equipo no está enrolado en la API. Enrolando...");
 
@@ -159,22 +296,23 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger) : BackgroundSer
         ApiClient.EnrollResponseDto? respuestaEnroll = await ApiClient.EnrollAsync(urlApi, solicitudEnroll);
         if (respuestaEnroll is null)
         {
-            logger.LogWarning("No se pudo enrolar el equipo (API no disponible). Se usará el PcId manual ({PcIdManual}) mientras tanto.", pcIdManual);
-            return pcIdManual;
+            logger.LogWarning("No se pudo enrolar el equipo (API no disponible). Se reintentará en el próximo envío; mientras tanto se usa el PcId manual ({PcIdManual}).", _pcIdManual);
+            return;
         }
 
         var respuestaConfirmacion = await ApiClient.ConfirmEnrollmentAsync(urlApi, respuestaEnroll.Id, respuestaEnroll.UsageCode);
         if (respuestaConfirmacion is null)
         {
-            logger.LogWarning("No se pudo confirmar el enrolamiento. Se usará el PcId manual ({PcIdManual}) mientras tanto.", pcIdManual);
-            return pcIdManual;
+            logger.LogWarning("No se pudo confirmar el enrolamiento. Se reintentará en el próximo envío; mientras tanto se usa el PcId manual ({PcIdManual}).", _pcIdManual);
+            return;
         }
 
         enrolamiento = new EnrollmentStore.Enrollment(respuestaEnroll.Id, respuestaConfirmacion.ApiKey, identidad.Uuid, DateTime.UtcNow);
         EnrollmentStore.Guardar(enrolamiento);
         logger.LogInformation("Equipo enrolado correctamente. PcId asignado por la API: {PcId}", enrolamiento.ClientId);
 
-        return enrolamiento.ClientId;
+        _pcId = enrolamiento.ClientId;
+        _apiKey = enrolamiento.ApiKey;
     }
 
     // Un valor NaN/Infinito no se puede serializar a JSON ni guardar en SQLite;

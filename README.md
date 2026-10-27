@@ -136,6 +136,7 @@ Normalmente basta con `-ApiUrl` al instalar. Para ajustar otros valores en un PC
 - `ApiUrl`: dirección de la API (por defecto `http://localhost:5000`).
 - `IntervaloLecturaSegundos`: cada cuánto se leen los sensores (por defecto 10, mínimo 5).
 - `IntervaloEnvioSegundos`: cada cuánto se envía lo acumulado (por defecto 60, mínimo 5).
+- `JitterEnvioSegundos`: variación al azar, en segundos (±), que se aplica a cada espera del envío para que varios PC no envíen a la vez (por defecto 5; con 0 se desactiva).
 - `TamanoLote`: lecturas por envío (por defecto 100; la API acepta hasta 500).
 - `MostrarJson`: escribe en el log el JSON de cada envío. Conviene ponerlo en `false` en los PC ya desplegados.
 

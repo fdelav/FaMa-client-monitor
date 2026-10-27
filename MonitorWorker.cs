@@ -17,7 +17,8 @@ namespace FaMaClientMonitor;
 // Hay DOS bucles independientes que se comunican por la cola local (SQLite):
 //   - Lectura (cada IntervaloLecturaSegundos, 10 s por defecto): lee los
 //     sensores y guarda la lectura en la cola. Nunca espera a la red.
-//   - Envío (cada IntervaloEnvioSegundos, 60 s por defecto): manda todo lo
+//   - Envío (cada IntervaloEnvioSegundos, 60 s por defecto, ± JitterEnvioSegundos
+//     al azar para que varios PC no envíen a la vez): manda todo lo
 //     acumulado en lotes a /agent/statusreport/batch y borra de la cola lo que
 //     la API aceptó. Si la API no responde, las lecturas siguen en la cola y
 //     se reintenta en el siguiente envío. Si el programa se cierra de golpe,
@@ -32,6 +33,7 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOp
     private int _tamanoLote;
     private int _intervaloLecturaSegundos;
     private int _intervaloEnvioSegundos;
+    private int _jitterEnvioSegundos;
 
     // Identidad de este equipo ante la API. Son campos (no variables locales)
     // porque pueden cambiar mientras el programa corre: si la API no estaba
@@ -63,13 +65,18 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOp
         _intervaloEnvioSegundos = Math.Max(_config.IntervaloEnvioSegundos, IntervaloMinimoSegundos);
         _tamanoLote = Math.Clamp(_config.TamanoLote, 1, TamanoLoteMaximo);
 
+        // La variación no puede pasar de la mitad del intervalo: así la espera
+        // nunca se acerca a cero ni se duplica.
+        _jitterEnvioSegundos = Math.Clamp(_config.JitterEnvioSegundos, 0, _intervaloEnvioSegundos / 2);
+
         if (_intervaloLecturaSegundos != _config.IntervaloLecturaSegundos
             || _intervaloEnvioSegundos != _config.IntervaloEnvioSegundos
+            || _jitterEnvioSegundos != _config.JitterEnvioSegundos
             || _tamanoLote != _config.TamanoLote)
         {
             logger.LogWarning(
-                "Configuración ajustada a los límites permitidos: IntervaloLecturaSegundos={Lectura}, IntervaloEnvioSegundos={Envio} (mínimo {Min} s), TamanoLote={Lote} (1 a {Max}).",
-                _intervaloLecturaSegundos, _intervaloEnvioSegundos, IntervaloMinimoSegundos, _tamanoLote, TamanoLoteMaximo);
+                "Configuración ajustada a los límites permitidos: IntervaloLecturaSegundos={Lectura}, IntervaloEnvioSegundos={Envio} (mínimo {Min} s), JitterEnvioSegundos={Jitter} (0 a la mitad del envío), TamanoLote={Lote} (1 a {Max}).",
+                _intervaloLecturaSegundos, _intervaloEnvioSegundos, IntervaloMinimoSegundos, _jitterEnvioSegundos, _tamanoLote, TamanoLoteMaximo);
         }
 
         ApiClient.Registrar = mensaje => logger.LogWarning("{Mensaje}", mensaje);
@@ -79,8 +86,8 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOp
         logger.LogInformation("FaMa Client Monitor — registrando datos reales de hardware");
         logger.LogInformation("PC Id: {PcId}", _pcId);
         logger.LogInformation(
-            "Lectura cada {Lectura} s; envío en lotes cada {Envio} s (hasta {Lote} lecturas por petición) a: {UrlApi}",
-            _intervaloLecturaSegundos, _intervaloEnvioSegundos, _tamanoLote, urlApi);
+            "Lectura cada {Lectura} s; envío en lotes cada {Envio} s ± {Jitter} s (hasta {Lote} lecturas por petición) a: {UrlApi}",
+            _intervaloLecturaSegundos, _intervaloEnvioSegundos, _jitterEnvioSegundos, _tamanoLote, urlApi);
         logger.LogInformation("Cola local (lecturas por enviar) en: {Ruta}", rutaBaseDeDatos);
 
         if (!WindowsStatusMonitor.EsAdministrador())
@@ -123,11 +130,22 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOp
         while (await EsperarSiguienteAsync(temporizador, stoppingToken));
     }
 
-    // Envía lo acumulado en la cola. La primera vez corre al arrancar, así que
-    // si quedaron lecturas de una ejecución anterior se mandan enseguida.
+    // Envía lo acumulado en la cola. La primera vez corre al arrancar (tras un
+    // pequeño retraso al azar), así que si quedaron lecturas de una ejecución
+    // anterior se mandan casi enseguida.
+    //
+    // La espera entre envíos NO es exacta: cada una dura el intervalo ± un valor
+    // al azar (JitterEnvioSegundos). Con un PeriodicTimer exacto, varios PC que
+    // arrancan a la vez enviarían siempre en el mismo instante; con la variación,
+    // sus envíos se van repartiendo solos y la API no recibe ráfagas.
     private async Task BucleDeEnvioAsync(string urlApi, string rutaBaseDeDatos, CancellationToken stoppingToken)
     {
-        using var temporizador = new PeriodicTimer(TimeSpan.FromSeconds(_intervaloEnvioSegundos));
+        // Al iniciar sesión muchos equipos arrancan casi a la vez (inicio de clase):
+        // el primer envío también se desfasa.
+        if (!await EsperarAsync(TimeSpan.FromMilliseconds(Random.Shared.Next(0, _jitterEnvioSegundos * 1000 + 1)), stoppingToken))
+        {
+            return;
+        }
 
         do
         {
@@ -140,7 +158,30 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOp
                 logger.LogError(ex, "Error inesperado al enviar lecturas; se reintentará en el próximo envío.");
             }
         }
-        while (await EsperarSiguienteAsync(temporizador, stoppingToken));
+        while (await EsperarAsync(SiguienteEsperaDeEnvio(), stoppingToken));
+    }
+
+    // Intervalo de envío ± una variación al azar (en milisegundos, para que el
+    // reparto sea fino y dos equipos casi nunca coincidan). Nunca baja del mínimo.
+    private TimeSpan SiguienteEsperaDeEnvio()
+    {
+        int variacionMs = Random.Shared.Next(-_jitterEnvioSegundos * 1000, _jitterEnvioSegundos * 1000 + 1);
+        double segundos = Math.Max(IntervaloMinimoSegundos, _intervaloEnvioSegundos + variacionMs / 1000.0);
+        return TimeSpan.FromSeconds(segundos);
+    }
+
+    // true = pasó la espera; false = se pidió detener el programa.
+    private static async Task<bool> EsperarAsync(TimeSpan espera, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await Task.Delay(espera, stoppingToken);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
     }
 
     // true = hubo otro tick; false = se pidió detener el programa.

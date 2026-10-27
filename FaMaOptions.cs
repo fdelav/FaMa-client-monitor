@@ -27,6 +27,14 @@ public sealed class FaMaOptions
     // envío, cada lote lleva unas 6 lecturas.
     public int IntervaloEnvioSegundos { get; set; } = 60;
 
+    // Variación aleatoria, en segundos (±), que se aplica a CADA espera del envío.
+    // Con varios PC arrancando a la vez (por ejemplo al empezar una clase), un
+    // intervalo exacto haría que todos enviaran en el mismo instante; con esta
+    // variación sus envíos se van repartiendo solos. Con 5 y un envío de 60 s,
+    // cada espera dura entre 55 y 65 s. Con 0 se desactiva. No afecta a la hora
+    // de las lecturas: cada una conserva el momento real en que se tomó.
+    public int JitterEnvioSegundos { get; set; } = 5;
+
     // Máximo de lecturas por petición de lote (la API acepta hasta 500). Solo
     // importa cuando hay muchas acumuladas, por ejemplo tras una caída de la API.
     public int TamanoLote { get; set; } = 100;

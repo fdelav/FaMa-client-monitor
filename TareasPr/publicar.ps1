@@ -31,13 +31,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Carpeta de este script ($PSScriptRoot a veces llega vacio; se usa un plan B).
 $aqui = $PSScriptRoot
 if (-not $aqui -and $MyInvocation.MyCommand.Path) { $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $aqui) { $aqui = (Get-Location).Path }
 
-# Raiz del proyecto: la carpeta que tiene FaMaClientMonitor.csproj. Los scripts viven en la
-# subcarpeta TareaPr, asi que se busca en esta carpeta y en la anterior.
 $raiz = $aqui
 if (-not (Test-Path (Join-Path $raiz 'FaMaClientMonitor.csproj'))) { $raiz = Split-Path -Parent $aqui }
 if (-not $raiz -or -not (Test-Path (Join-Path $raiz 'FaMaClientMonitor.csproj'))) {
@@ -59,7 +56,6 @@ if ($ApiUrl) {
     }
 }
 
-# Limpieza de la carpeta de salida, solo si esta vacia o es un paquete anterior (nunca una carpeta ajena).
 if ((Test-Path $Salida) -and (Get-ChildItem $Salida -Force | Select-Object -First 1)) {
     if (-not (Test-Path (Join-Path $Salida 'FaMaClientMonitor.exe'))) {
         throw "$Salida no esta vacia y no parece un paquete anterior; no se borra."
@@ -67,19 +63,15 @@ if ((Test-Path $Salida) -and (Get-ChildItem $Salida -Force | Select-Object -Firs
     Remove-Item $Salida -Recurse -Force
 }
 
-# Release, con el runtime incluido: en los equipos institucionales no se puede instalar .NET.
 dotnet publish (Join-Path $raiz 'FaMaClientMonitor.csproj') -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o $Salida
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish fallo (codigo $LASTEXITCODE)." }
 
 foreach ($archivo in 'instalar.ps1', 'instalar.cmd', 'desinstalar.ps1', 'desinstalar.cmd', 'pausar.ps1', 'pausar.cmd', 'reanudar.ps1', 'reanudar.cmd', 'probar-entorno.ps1') {
-    # Los scripts estan junto a este (TareaPr); si alguno se dejo en la raiz, tambien se encuentra.
     $ruta = Join-Path $aqui $archivo
     if (-not (Test-Path $ruta)) { $ruta = Join-Path $raiz $archivo }
     if (Test-Path $ruta) { Copy-Item $ruta $Salida -Force } else { Write-Warning "No se encontro $archivo; no se incluye en el paquete." }
 }
 
-# Instalacion con Administrador (servicio de Windows): rama instalacion-admin. Va en el paquete
-# aparte de los demas scripts; solo se usa si TIC la autoriza.
 $carpetaAdmin = Join-Path $raiz 'InstalacionAdmin'
 foreach ($archivo in 'instalar-admin.ps1', 'desinstalar-admin.ps1') {
     $ruta = Join-Path $carpetaAdmin $archivo

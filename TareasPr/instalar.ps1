@@ -35,8 +35,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Carpeta de este script. $PSScriptRoot a veces llega vacio (segun como se lance el script),
-# asi que se calcula con un plan B en lugar de usarlo como valor por defecto del parametro.
 $aqui = $PSScriptRoot
 if (-not $aqui -and $MyInvocation.MyCommand.Path) { $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $aqui) { $aqui = (Get-Location).Path }
@@ -67,35 +65,27 @@ if ($esAdmin) {
     Write-Warning 'Esta consola es de Administrador: se instalara igual, pero solo para ESTE usuario. Para instalar como lo hara el equipo real, usa una cuenta normal.'
 }
 
-# 1) Si ya hay una copia corriendo de este usuario, se detiene para poder reemplazar los archivos.
 Get-Process -Name $nombre -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
-# 2) Copia de archivos. No se pisan la cola local (monitoreo.db), el enrolamiento ni los logs.
 New-Item -ItemType Directory -Force -Path $destino | Out-Null
 Copy-Item -Path (Join-Path $Origen '*') -Destination $destino -Recurse -Force `
     -Exclude 'monitoreo.db', 'enrollment.dat', 'logs', 'appsettings.Production.json', '*.ps1', '*.cmd', '*.pdb'
 
-# Ajuste de la URL de la API para este equipo, sin tocar appsettings.json del paquete.
 if ($ApiUrl) {
     $override = @{ FaMa = @{ ApiUrl = $ApiUrl } } | ConvertTo-Json -Depth 3
     [System.IO.File]::WriteAllText((Join-Path $destino 'appsettings.Production.json'), $override, (New-Object System.Text.UTF8Encoding($false)))
 }
 
-# pausar / reanudar se dejan tambien en la carpeta instalada, para poder usarlos sin el paquete.
 foreach ($archivo in 'pausar.ps1', 'pausar.cmd', 'reanudar.ps1', 'reanudar.cmd') {
     $origenArchivo = Join-Path $Origen $archivo
     if (Test-Path $origenArchivo) { Copy-Item $origenArchivo $destino -Force }
 }
 
-# Lo descargado de internet (o de un zip) trae la marca "Mark of the Web", que hace que SmartScreen
-# y algunas politicas bloqueen el .exe. Quitarla de los archivos propios no requiere Administrador.
 Get-ChildItem -Path $destino -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
 
 $exe = Join-Path $destino "$nombre.exe"
 
-# 3) Lanzador oculto. El cliente es una aplicacion de consola; wscript la abre sin ventana.
-#    (Unicode: la ruta del perfil puede tener tildes.)
 $vbs = Join-Path $destino 'lanzar-oculto.vbs'
 $lineas = @(
     'Set sh = CreateObject("WScript.Shell")',
@@ -104,11 +94,9 @@ $lineas = @(
 )
 Set-Content -Path $vbs -Value $lineas -Encoding Unicode
 
-# 4) Arranque automatico al iniciar sesion de ESTE usuario.
 $comando = 'wscript.exe //B //Nologo "{0}"' -f $vbs
 Set-ItemProperty -Path $claveRun -Name $nombre -Value $comando
 
-# 5) Arrancarlo ahora, sin esperar al proximo inicio de sesion.
 Start-Process -FilePath 'wscript.exe' -ArgumentList '//B', '//Nologo', "`"$vbs`""
 Start-Sleep -Seconds 5
 

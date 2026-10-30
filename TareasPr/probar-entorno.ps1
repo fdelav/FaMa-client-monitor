@@ -30,7 +30,6 @@ function Registrar([string]$nombre, [string]$estado, [string]$detalle) {
     Write-Host ('[{0,-5}] {1}: {2}' -f $estado, $nombre, $detalle) -ForegroundColor $color
 }
 
-# 0) Datos del equipo.
 $esAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $textoAdmin = if ($esAdmin) { 'si' } else { 'no' }
 Write-Host "Equipo: $env:COMPUTERNAME | Usuario: $env:USERNAME | Administrador: $textoAdmin | PowerShell $($PSVersionTable.PSVersion)"
@@ -39,7 +38,6 @@ if ($esAdmin) {
 }
 Write-Host ''
 
-# 1) PowerShell: modo de lenguaje y politicas de grupo.
 $modo = $ExecutionContext.SessionState.LanguageMode
 if ($modo -eq 'FullLanguage') {
     Registrar 'PowerShell' 'OK' 'Modo de lenguaje completo.'
@@ -55,7 +53,6 @@ if ($politicaGrupo.Count -gt 0) {
     Registrar 'Politica de scripts' 'OK' 'Ninguna politica de grupo bloquea scripts.'
 }
 
-# 2) Escritura en la carpeta del usuario.
 $carpeta = Join-Path $env:LOCALAPPDATA 'FaMa\prueba'
 try {
     New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
@@ -65,7 +62,6 @@ try {
     Registrar 'Carpeta del usuario' 'FALLA' $_.Exception.Message
 }
 
-# 3) El perfil conserva archivos entre sesiones? Se deja una marca y se busca en la siguiente prueba.
 $marca = Join-Path $env:LOCALAPPDATA 'FaMa\marca-perfil.txt'
 if (Test-Path $marca) {
     $creada = (Get-Content $marca -Raw).Trim()
@@ -75,7 +71,6 @@ if (Test-Path $marca) {
     Registrar 'Perfil persistente' 'AVISO' 'Primera prueba: cierra sesion, vuelve a entrar y ejecuta este script otra vez. Si la marca desaparece, el perfil se borra al cerrar sesion y lo instalado se pierde.'
 }
 
-# 4) Arranque automatico: clave Run del usuario.
 $claveRun = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 try {
     Set-ItemProperty -Path $claveRun -Name 'FaMaPrueba' -Value 'cmd.exe /c exit'
@@ -85,7 +80,6 @@ try {
     Registrar 'Arranque automatico' 'FALLA' $_.Exception.Message
 }
 
-# 5) Lanzador oculto: wscript.
 $vbs = Join-Path $carpeta 'p.vbs'
 try {
     Set-Content -Path $vbs -Value 'WScript.Quit 7' -Encoding Ascii
@@ -99,7 +93,6 @@ try {
     Registrar 'Lanzador oculto (wscript)' 'FALLA' $_.Exception.Message
 }
 
-# 6) Red hacia la API.
 if (-not $ApiUrl) {
     $aqui = $PSScriptRoot; if (-not $aqui -and $MyInvocation.MyCommand.Path) { $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path }; if (-not $aqui) { $aqui = (Get-Location).Path }
     $cfg = Join-Path $aqui 'appsettings.json'
@@ -128,7 +121,6 @@ if (-not $ApiUrl) {
     }
 }
 
-# 7) Temperatura sin Administrador.
 try {
     $zonas = @(Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction Stop)
     if ($zonas.Count -gt 0) {

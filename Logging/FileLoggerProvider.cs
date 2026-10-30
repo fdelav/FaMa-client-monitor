@@ -3,14 +3,6 @@ using Microsoft.Extensions.Logging;
 
 namespace FaMaClientMonitor.Logging;
 
-// Proveedor de logging mínimo que escribe a un archivo de texto, uno por día,
-// en la carpeta indicada (por defecto "logs" junto al ejecutable).
-//
-// Se usa JUNTO al logging de consola (que el Host agrega por defecto), no en
-// su lugar: en consola se ve en vivo mientras corres el programa a mano; el
-// archivo queda disponible para revisar después, que es lo que hace falta en
-// cuanto el cliente corra en segundo plano (lanzado oculto al iniciar sesión)
-// y no haya ninguna consola donde mirar.
 public sealed class FileLoggerProvider(string carpetaLogs) : ILoggerProvider
 {
     private readonly object _bloqueoArchivo = new();
@@ -39,8 +31,6 @@ public sealed class FileLoggerProvider(string carpetaLogs) : ILoggerProvider
             Directory.CreateDirectory(carpetaLogs);
             string rutaArchivo = Path.Combine(carpetaLogs, $"cliente-{DateTime.Now:yyyyMMdd}.log");
 
-            // Un solo bloqueo compartido entre todas las categorías: varios
-            // hilos pueden escribir al mismo archivo al mismo tiempo.
             lock (bloqueoArchivo)
             {
                 File.AppendAllText(rutaArchivo, linea + Environment.NewLine);

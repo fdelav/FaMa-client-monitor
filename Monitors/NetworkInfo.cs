@@ -4,16 +4,8 @@ using System.Net.Sockets;
 
 namespace FaMaClientMonitor.Monitors;
 
-// Detecta la dirección MAC e IPv4 "principal" del equipo.
-//
-// Un PC suele tener varios adaptadores (Ethernet, Wi-Fi, VPN, VMware,
-// Hyper-V, Docker...). Se elige el que probablemente usa el equipo para
-// salir a la red: activo, con IPv4 válida y, de preferencia, con puerta de
-// enlace y que no sea un adaptador virtual.
 public static class NetworkInfo
 {
-    // MacAddress con formato AA:BB:CC:DD:EE:FF. Ambos vienen vacíos ("")
-    // si no se detecta ninguna interfaz activa.
     public record Datos(string MacAddress, string IpAddress);
 
     private static readonly string[] _marcasVirtuales =
@@ -29,8 +21,8 @@ public static class NetworkInfo
                 .Where(EsUtil)
                 .Select(ni => (Interfaz: ni, Ip: PrimeraIpv4(ni)))
                 .Where(x => x.Ip is not null)
-                .OrderBy(x => TieneGateway(x.Interfaz) ? 0 : 1) // primero las que tienen salida a la red
-                .ThenBy(x => EsVirtual(x.Interfaz) ? 1 : 0)      // y de ésas, las físicas antes que las virtuales
+                .OrderBy(x => TieneGateway(x.Interfaz) ? 0 : 1)
+                .ThenBy(x => EsVirtual(x.Interfaz) ? 1 : 0)
                 .FirstOrDefault();
 
             if (candidata.Interfaz is null)
@@ -50,15 +42,12 @@ public static class NetworkInfo
         }
     }
 
-    // Activa, que no sea loopback ni túnel, y con dirección MAC real.
     private static bool EsUtil(NetworkInterface ni)
         => ni.OperationalStatus == OperationalStatus.Up
            && ni.NetworkInterfaceType != NetworkInterfaceType.Loopback
            && ni.NetworkInterfaceType != NetworkInterfaceType.Tunnel
            && ni.GetPhysicalAddress().GetAddressBytes().Length > 0;
 
-    // Primera IPv4 que no sea link-local (169.254.x.x, la que Windows se
-    // autoasigna cuando no logra conseguir una IP de verdad).
     private static IPAddress? PrimeraIpv4(NetworkInterface ni)
         => ni.GetIPProperties().UnicastAddresses
             .Select(a => a.Address)

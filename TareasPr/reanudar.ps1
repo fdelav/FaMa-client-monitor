@@ -25,11 +25,9 @@ if (-not ((Test-Path $exe) -and (Test-Path $vbs))) {
     throw "El cliente no esta instalado en este equipo ($destino). Ejecuta instalar.cmd desde la carpeta del paquete."
 }
 
-# 1) Arranque automatico al iniciar sesion de este usuario.
 $comando = 'wscript.exe //B //Nologo "{0}"' -f $vbs
 Set-ItemProperty -Path $claveRun -Name $nombre -Value $comando
 
-# 2) Iniciarlo ahora, salvo que ya este corriendo.
 if (-not (Get-Process -Name $nombre -ErrorAction SilentlyContinue)) {
     Start-Process -FilePath 'wscript.exe' -ArgumentList '//B', '//Nologo', "`"$vbs`""
     Start-Sleep -Seconds 5

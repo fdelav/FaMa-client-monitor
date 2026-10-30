@@ -31,7 +31,6 @@ if (-not $programData) { $programData = [Environment]::GetFolderPath('CommonAppl
 $destino = Join-Path $programFiles 'FaMa\cliente'
 $datos   = Join-Path $programData 'FaMa'
 
-# Detener y eliminar el servicio.
 $servicio = Get-Service -Name $nombre -ErrorAction SilentlyContinue
 if ($servicio) {
     if ($servicio.Status -ne 'Stopped') {
@@ -43,12 +42,10 @@ if ($servicio) {
 Get-Process -Name $nombre -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
-# Programa.
 if (Test-Path $destino) { Remove-Item -Path $destino -Recurse -Force -ErrorAction SilentlyContinue }
 $padre = Split-Path -Parent $destino
 if ((Test-Path $padre) -and -not (Get-ChildItem $padre -Force | Select-Object -First 1)) { Remove-Item $padre -Force -ErrorAction SilentlyContinue }
 
-# Datos (solo si se pide).
 if ($BorrarDatos -and (Test-Path $datos)) { Remove-Item -Path $datos -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Host 'Servicio del cliente FaMa eliminado.' -ForegroundColor Green

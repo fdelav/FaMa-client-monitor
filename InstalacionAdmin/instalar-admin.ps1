@@ -51,13 +51,11 @@ $ErrorActionPreference = 'Stop'
 
 $nombre = 'FaMaClientMonitor'
 
-# --- Administrador ---------------------------------------------------------------------------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Este script instala un servicio de Windows y necesita Administrador. Abre PowerShell con "Ejecutar como administrador" y vuelve a ejecutarlo.'
 }
 
-# --- Rutas -----------------------------------------------------------------------------------
 $aqui = $PSScriptRoot
 if (-not $aqui -and $MyInvocation.MyCommand.Path) { $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $aqui) { $aqui = (Get-Location).Path }
@@ -88,14 +86,11 @@ if ($ApiUrl) {
     }
 }
 
-# --- 1) Detener lo que ya este corriendo -------------------------------------------------------
 $servicio = Get-Service -Name $nombre -ErrorAction SilentlyContinue
 if ($servicio -and $servicio.Status -ne 'Stopped') {
     Stop-Service -Name $nombre -Force
     $servicio.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
 }
-# Copias de la instalacion por usuario que sigan abiertas (de cualquier sesion). Sus entradas de
-# arranque no se tocan: al arrancar de nuevo se cerraran solas porque el servicio ya tiene el mutex.
 $copiasUsuario = Get-Process -Name $nombre -ErrorAction SilentlyContinue
 if ($copiasUsuario) {
     Write-Warning 'Habia copias del cliente en ejecucion (instalacion por usuario): se detienen.'
@@ -103,7 +98,6 @@ if ($copiasUsuario) {
     Start-Sleep -Seconds 1
 }
 
-# --- 2) Programa en Program Files --------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $destino | Out-Null
 Copy-Item -Path (Join-Path $Origen '*') -Destination $destino -Recurse -Force `
     -Exclude 'monitoreo.db', 'enrollment.dat', 'logs', 'appsettings.Production.json', '*.ps1', '*.cmd', '*.vbs', '*.pdb'
@@ -114,11 +108,8 @@ if ($ApiUrl) {
 }
 Get-ChildItem -Path $destino -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
 
-# --- 3) Carpeta de datos -----------------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $Datos | Out-Null
 
-# --- 4) Servicio -------------------------------------------------------------------------------
-# --FaMa:DatosDir le dice al programa donde guardar cola, registro y logs.
 $rutaServicio = '"{0}" --FaMa:DatosDir="{1}"' -f $exe, $Datos
 
 if (-not (Get-Service -Name $nombre -ErrorAction SilentlyContinue)) {
@@ -126,14 +117,11 @@ if (-not (Get-Service -Name $nombre -ErrorAction SilentlyContinue)) {
         -Description 'Mide el estado del equipo (CPU, RAM, GPU, temperatura y disco) y lo envia a la API de FaMa.' `
         -StartupType Automatic | Out-Null
 }
-# El ejecutable se fija por registro para evitar problemas de comillas al llamar a sc.exe.
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$nombre" -Name ImagePath -Value $rutaServicio
 
-# Arranque diferido: no compite con el resto de servicios al encender el equipo.
 & sc.exe config $nombre start= delayed-auto | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "sc.exe config start fallo (codigo $LASTEXITCODE)." }
 
-# Cuenta del servicio.
 if ($ComoSystem) {
     & sc.exe config $nombre obj= LocalSystem | Out-Null
 } else {
@@ -141,11 +129,9 @@ if ($ComoSystem) {
 }
 if ($LASTEXITCODE -ne 0) { throw "sc.exe config obj fallo (codigo $LASTEXITCODE)." }
 
-# Si falla, se reinicia: 3 intentos, 1 minuto entre cada uno.
 & sc.exe failure $nombre reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "sc.exe failure fallo (codigo $LASTEXITCODE)." }
 
-# Origen de eventos, para que el servicio pueda escribir en el Visor de eventos (Aplicacion).
 try {
     if (-not [System.Diagnostics.EventLog]::SourceExists($nombre)) {
         [System.Diagnostics.EventLog]::CreateEventSource($nombre, 'Application')
@@ -154,9 +140,6 @@ try {
     Write-Warning "No se pudo registrar el origen de eventos: $($_.Exception.Message)"
 }
 
-# --- 5) Permisos de la carpeta de datos --------------------------------------------------------
-# Se usan los SID conocidos (S-1-5-18 SYSTEM, S-1-5-32-544 Administradores) para que funcione
-# igual en Windows en espanol. Los usuarios normales no tienen ningun acceso a los datos.
 $permisos = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F')
 if (-not $ComoSystem) { $permisos += "NT SERVICE\${nombre}:(OI)(CI)M" }
 $argumentosIcacls = @($Datos, '/inheritance:r')
@@ -164,7 +147,6 @@ foreach ($permiso in $permisos) { $argumentosIcacls += '/grant:r'; $argumentosIc
 & icacls.exe @argumentosIcacls | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls fallo (codigo $LASTEXITCODE)." }
 
-# --- 6) Iniciar --------------------------------------------------------------------------------
 Start-Service -Name $nombre
 Start-Sleep -Seconds 5
 $estado = (Get-Service -Name $nombre).Status

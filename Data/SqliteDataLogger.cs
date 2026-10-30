@@ -4,9 +4,6 @@ using Microsoft.Data.Sqlite;
 
 namespace FaMaClientMonitor.Data;
 
-// Cola de respaldo local: guarda lecturas que NO se pudieron enviar a la
-// API (ej. sin conexión al servidor), para reintentarlas más tarde. Si el
-// envío a la API funciona a la primera, el dato nunca pasa por aquí.
 public static class SqliteDataLogger
 {
     private static readonly object _bloqueo = new();
@@ -23,11 +20,6 @@ public static class SqliteDataLogger
 
         using var comando = conexion.CreateCommand();
 
-        // Si el archivo .db viene de una versión anterior del cliente, la tabla
-        // "pendientes" existe pero con la columna "timestamp" en vez de
-        // "created_at". CREATE TABLE IF NOT EXISTS no la modifica, y las
-        // consultas fallarían con "no such column". En ese caso se conserva la
-        // tabla vieja renombrada (no se pierde nada) y se crea una nueva.
         comando.CommandText = "SELECT COUNT(*) FROM pragma_table_info('pendientes');";
         long columnasTotales = Convert.ToInt64(comando.ExecuteScalar(), CultureInfo.InvariantCulture);
 
@@ -58,8 +50,6 @@ public static class SqliteDataLogger
             """;
         comando.ExecuteNonQuery();
 
-        // Bases creadas antes de las métricas de disco: se agregan las columnas
-        // sin tocar las lecturas que ya estaban en cola (valen 0).
         foreach (string columna in new[] { "disk_activity", "disk_response_ms" })
         {
             comando.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('pendientes') WHERE name = '{columna}';";
@@ -70,8 +60,6 @@ public static class SqliteDataLogger
             }
         }
 
-        // Versión intermedia del cliente: guardaba también lectura/escritura en
-        // MB/s. Ya no se usan; se eliminan las columnas (SQLite 3.35+).
         foreach (string columna in new[] { "disk_read_bps", "disk_write_bps" })
         {
             comando.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('pendientes') WHERE name = '{columna}';";
@@ -85,9 +73,6 @@ public static class SqliteDataLogger
         _tablaCreada = true;
     }
 
-    // Guarda una lectura que no se pudo enviar, para reintentar después.
-    // "momentoLectura" es la hora REAL en que se leyeron los sensores (UTC),
-    // no la hora en que eventualmente se reintente el envío.
     public static void GuardarPendiente(string rutaArchivo, int pcId, float ram, float cpu, float gpu, float temperatura, DiskMonitor.Lectura disco, DateTime momentoLectura)
     {
         lock (_bloqueo)
@@ -106,8 +91,6 @@ public static class SqliteDataLogger
                         $diskActivity, $diskResponse);
                 """;
 
-            // Formato "o" (round-trip ISO 8601) preserva la hora exacta y la
-            // zona (UTC) para poder reconstruir el DateTime sin ambigüedad.
             comando.Parameters.AddWithValue("$createdAt", momentoLectura.ToString("o", CultureInfo.InvariantCulture));
             comando.Parameters.AddWithValue("$pcId", pcId);
             comando.Parameters.AddWithValue("$ram", ram);
@@ -125,7 +108,6 @@ public static class SqliteDataLogger
         long Id, int PcId, float Ram, float Cpu, float Gpu, float Temp, DateTime CreatedAt,
         float DiskActivity, float DiskResponseMs);
 
-    // Retorna todas las lecturas que siguen esperando ser enviadas.
     public static List<Pendiente> ObtenerPendientes(string rutaArchivo)
     {
         lock (_bloqueo)
@@ -163,7 +145,6 @@ public static class SqliteDataLogger
         }
     }
 
-    // Borra varios pendientes ya enviados exitosamente (en una sola transacción).
     public static void EliminarPendientes(string rutaArchivo, IEnumerable<long> ids)
     {
         lock (_bloqueo)

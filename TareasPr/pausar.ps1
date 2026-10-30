@@ -16,14 +16,12 @@ param()
 $nombre   = 'FaMaClientMonitor'
 $claveRun = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
-# 1) Detener el cliente de este usuario.
 $procesos = Get-Process -Name $nombre -ErrorAction SilentlyContinue
 if ($procesos) {
     $procesos | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 
-# 2) Quitar el arranque automatico (sin borrar archivos).
 Remove-ItemProperty -Path $claveRun -Name $nombre -ErrorAction SilentlyContinue
 
 Write-Host ''

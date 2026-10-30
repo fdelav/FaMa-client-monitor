@@ -132,7 +132,19 @@ if (!string.IsNullOrWhiteSpace(pcIdEntorno)) builder.Configuration["FaMa:PcIdMan
 
 builder.Services.Configure<FaMaOptions>(builder.Configuration.GetSection(FaMaOptions.Seccion));
 
-builder.Logging.AddFile(Path.Combine(AppContext.BaseDirectory, "logs"));
+// Carpeta de datos (cola local, registro del equipo y logs). Sin indicar nada es la
+// carpeta del .exe; el instalador de servicio la manda a ProgramData con
+// --FaMa:DatosDir=... Debe fijarse ANTES de abrir el log o leer el enrolamiento.
+Rutas.Inicializar(builder.Configuration["FaMa:DatosDir"]);
+
+// Servicio de Windows: cuando Windows lo arranca como servicio, el Host obedece las
+// órdenes de iniciar y detener del Administrador de servicios (y no las señales de
+// consola). Si se ejecuta a mano (dotnet run, doble clic) no cambia nada: sigue
+// siendo una aplicación de consola normal. Registrar el servicio exige
+// Administrador; ver InstalacionAdmin\README.md.
+builder.Services.AddWindowsService(opciones => opciones.ServiceName = "FaMaClientMonitor");
+
+builder.Logging.AddFile(Path.Combine(Rutas.Datos, "logs"));
 
 builder.Services.AddHostedService<MonitorWorker>();
 

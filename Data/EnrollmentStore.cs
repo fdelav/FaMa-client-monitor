@@ -24,7 +24,7 @@ public static class EnrollmentStore
 {
     public record Enrollment(int ClientId, Guid ApiKey, string Uuid, DateTime EnrolledAtUtc);
 
-    private static string RutaArchivo => Path.Combine(AppContext.BaseDirectory, "enrollment.dat");
+    private static string RutaArchivo => Path.Combine(Rutas.Datos, "enrollment.dat");
 
     // Devuelve el enrolamiento guardado, o null si no existe, está dañado, o
     // no se puede descifrar (por ejemplo, el archivo se copió desde otro PC).

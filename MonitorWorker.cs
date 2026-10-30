@@ -46,7 +46,7 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOp
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        string rutaBaseDeDatos = Path.Combine(AppContext.BaseDirectory, "monitoreo.db");
+        string rutaBaseDeDatos = Path.Combine(Rutas.Datos, "monitoreo.db");
 
         // La configuración viene de appsettings.json (ver FaMaOptions).
         string urlApi = (_config.ApiUrl ?? string.Empty).Trim().TrimEnd('/');

@@ -15,6 +15,11 @@ public sealed class FaMaOptions
     // Dirección base de la API, sin barra final. Para ngrok: https://xxxx.ngrok-free.dev
     public string ApiUrl { get; set; } = "http://localhost:5000";
 
+    // Carpeta donde se guardan la cola local, el registro del equipo y los logs.
+    // Vacío = la carpeta del .exe (instalación por usuario). La instalación como
+    // servicio la apunta a ProgramData.
+    public string? DatosDir { get; set; }
+
     // PcId que se usa solo si el equipo no se pudo enrolar todavía.
     public int PcIdManual { get; set; } = 1;
 

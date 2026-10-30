@@ -16,7 +16,7 @@ Necesitas el SDK de .NET 10. Comprueba que está instalado:
 dotnet --version
 ```
 
-Debe mostrar una versión que empiece por `10`. Sitúate en la raíz del proyecto:
+Debe mostrar una versión que empiece por `10`. Sitúate en la raíz del proyecto (la carpeta que tiene `FaMaClientMonitor.csproj`; los scripts están en la subcarpeta `TareaPr`):
 
 ```powershell
 cd "ruta al proyecto"
@@ -25,7 +25,7 @@ cd "ruta al proyecto"
 Genera el paquete, cambiando la dirección por la de tu API (la de ngrok, o `http://localhost:5000` si corre en el mismo PC):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\publicar.ps1 -ApiUrl https://direccion-de-tu-api
+powershell -NoProfile -ExecutionPolicy Bypass -File .\TareaPr\publicar.ps1 -ApiUrl https://direccion-de-tu-api
 ```
 
 Al terminar queda la carpeta `dist\FaMa-cliente`. Ya incluye todo lo necesario, así que los PC de las salas no necesitan instalar nada.
@@ -84,13 +84,27 @@ Ver si está corriendo:
 Get-Process FaMaClientMonitor
 ```
 
-Detenerlo:
+Detenerlo solo por ahora (vuelve a arrancar la próxima vez que se inicie sesión):
 
 ```powershell
 Stop-Process -Name FaMaClientMonitor
 ```
 
-Iniciarlo a mano: doble clic en `lanzar-oculto.vbs`, dentro de `%LOCALAPPDATA%\FaMa\cliente`.
+Iniciarlo a mano: doble clic en `lanzar-oculto.vbs`, dentro de `%LOCALAPPDATA%\FaMa\cliente`. No cambia el arranque automático.
+
+Pausar el cliente sin desinstalarlo. Lo detiene y quita el arranque automático, así que no vuelve a arrancar hasta que lo reanudes. No borra nada (registro del PC, cola de lecturas y logs quedan intactos). Mientras está en pausa no se toman lecturas y en la API el PC se ve inactivo:
+
+```powershell
+.\pausar.cmd
+```
+
+Reanudarlo (vuelve el arranque automático y se inicia en el momento):
+
+```powershell
+.\reanudar.cmd
+```
+
+`pausar.cmd` y `reanudar.cmd` también quedan instalados en `%LOCALAPPDATA%\FaMa\cliente`, así que se pueden usar sin el paquete.
 
 Cambiar la dirección de la API en un PC (desde la carpeta del paquete; reinicia el cliente y no se pierden datos):
 
@@ -161,6 +175,8 @@ Normalmente basta con `-ApiUrl` al instalar. Para ajustar otros valores en un PC
 
 ## Para quien desarrolle
 
+- Los scripts de instalación y mantenimiento (`publicar`, `instalar`, `desinstalar`, `pausar`, `reanudar`, `probar-entorno`) están en `TareaPr`. Al generar el paquete se copian a su raíz, y desde ahí se usan en cada PC.
+- Instalación con Administrador (servicio de Windows, solo si TIC la autoriza): ver `InstalacionAdmin\README.md`. Vive en la rama `feature/instalacion-admin`.
 - Todo debe funcionar con una cuenta normal. No se usan servicios, tareas como SYSTEM, drivers, SMART ni WMI de `root\wmi`, porque piden Administrador.
 - Ejecutar en desarrollo: `dotnet run` (monitoreo continuo) o `dotnet run -- --disco`, `--identidad`, `--sensores` (diagnósticos).
 - Una lectura que falla nunca debe tumbar el programa: devuelve un valor neutro y lo registra en el log.

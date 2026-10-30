@@ -67,7 +67,7 @@ public sealed class MonitorWorker(ILogger<MonitorWorker> logger, IOptions<FaMaOp
 
         if (!WindowsStatusMonitor.EsAdministrador())
         {
-            logger.LogInformation("El programa no se ejecuta como Administrador (es lo esperado en los equipos institucionales): la temperatura real del CPU no estará disponible; se intentará la zona térmica del sistema.");
+            logger.LogInformation("El programa no se ejecuta como Administrador : la temperatura real del CPU no estará disponible; se intentará la zona térmica del sistema.");
         }
 
         Task bucleDeEnvio = BucleDeEnvioAsync(urlApi, rutaBaseDeDatos, stoppingToken);

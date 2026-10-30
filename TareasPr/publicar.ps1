@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Se ejecuta en la maquina de desarrollo (la que tiene el SDK de .NET), NO en los equipos de las
-    salas. Deja en dist\FaMa-cliente todo lo necesario para instalar sin Administrador:
+    salas. Esta en la carpeta TareaPr del proyecto, pero genera el paquete de la raiz. Deja en dist\FaMa-cliente todo lo necesario para instalar sin Administrador:
     el cliente compilado en Release con el runtime de .NET incluido (self-contained), y los
     scripts instalar / desinstalar / probar-entorno.
 
@@ -31,12 +31,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Carpeta de este script ($PSScriptRoot a veces llega vacio; se usa un plan B).
 $aqui = $PSScriptRoot
 if (-not $aqui -and $MyInvocation.MyCommand.Path) { $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $aqui) { $aqui = (Get-Location).Path }
-if (-not $Salida) { $Salida = Join-Path $aqui 'dist\FaMa-cliente' }
-Set-Location $aqui
+
+$raiz = $aqui
+if (-not (Test-Path (Join-Path $raiz 'FaMaClientMonitor.csproj'))) { $raiz = Split-Path -Parent $aqui }
+if (-not $raiz -or -not (Test-Path (Join-Path $raiz 'FaMaClientMonitor.csproj'))) {
+    throw "No se encuentra FaMaClientMonitor.csproj ni en $aqui ni en la carpeta anterior. Este script debe estar en la raiz del proyecto o en una subcarpeta (TareaPr)."
+}
+
+if (-not $Salida) { $Salida = Join-Path $raiz 'dist\FaMa-cliente' }
+Set-Location $raiz
 
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     throw 'No se encuentra dotnet. Este script va en la maquina de desarrollo (con el SDK de .NET), no en los equipos de las salas.'
@@ -50,7 +56,6 @@ if ($ApiUrl) {
     }
 }
 
-# Limpieza de la carpeta de salida, solo si esta vacia o es un paquete anterior (nunca una carpeta ajena).
 if ((Test-Path $Salida) -and (Get-ChildItem $Salida -Force | Select-Object -First 1)) {
     if (-not (Test-Path (Join-Path $Salida 'FaMaClientMonitor.exe'))) {
         throw "$Salida no esta vacia y no parece un paquete anterior; no se borra."
@@ -58,13 +63,16 @@ if ((Test-Path $Salida) -and (Get-ChildItem $Salida -Force | Select-Object -Firs
     Remove-Item $Salida -Recurse -Force
 }
 
-# Release, con el runtime incluido: en los equipos institucionales no se puede instalar .NET.
-dotnet publish .\FaMaClientMonitor.csproj -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o $Salida
+dotnet publish (Join-Path $raiz 'FaMaClientMonitor.csproj') -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o $Salida
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish fallo (codigo $LASTEXITCODE)." }
 
 foreach ($archivo in 'instalar.ps1', 'instalar.cmd', 'desinstalar.ps1', 'desinstalar.cmd', 'pausar.ps1', 'pausar.cmd', 'reanudar.ps1', 'reanudar.cmd', 'probar-entorno.ps1') {
-    Copy-Item (Join-Path $aqui $archivo) $Salida -Force
+    $ruta = Join-Path $aqui $archivo
+    if (-not (Test-Path $ruta)) { $ruta = Join-Path $raiz $archivo }
+    if (Test-Path $ruta) { Copy-Item $ruta $Salida -Force } else { Write-Warning "No se encontro $archivo; no se incluye en el paquete." }
 }
+
+
 
 if ($ApiUrl) {
     $ruta = Join-Path $Salida 'appsettings.json'
